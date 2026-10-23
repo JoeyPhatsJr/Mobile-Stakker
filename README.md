@@ -4,7 +4,7 @@
 
 ## Use it
 
-1. Open `index.html` on your phone. To host it, enable GitHub Pages under *Settings → Pages → Source: GitHub Actions*; the workflow deploys on every push to `main`.
+1. Open the hosted page on your phone: https://joeyphatsjr.github.io/Mobile-Stakker/ (deployed by `.github/workflows/pages.yml` on every push to `main`).
 2. Tap **Choose photos or a video** and pick a burst of Moon shots (20–60 is ideal) or a short video.
 3. Adjust **Keep sharpest**, sharpening and levels, then **Save image**.
 
@@ -18,3 +18,13 @@
 6. **Process.** Two-scale unsharp masking (fine detail and craters), black point, gamma, highlights and colour saturation for "mineral moon" shots.
 
 Limitations: it corrects drift but not field rotation or zoom changes between frames.
+
+## Tests
+
+`tests/make_test_data.py` renders 24 phone-style 4032×3024 JPEGs (small Moon, sky glow, a streetlight, shake, blur, noise, two clouded-out frames, one EXIF-rotated) plus H.264 and VP9 videos, all with known Moon positions. `tests/e2e.js` serves the app, emulates a phone in Playwright, uploads them and checks frame rejection, sub-pixel alignment against ground truth, noise reduction, every control, saving, and video frame extraction.
+
+```sh
+pip install numpy pillow   # ffmpeg must be on PATH
+python3 tests/make_test_data.py
+npm i playwright && node tests/e2e.js
+```

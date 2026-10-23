@@ -301,14 +301,29 @@ function waitEvent(el, name) { return new Promise((res, rej) => {
   el.addEventListener("error", bad, { once: true });
 }); }
 
+function seekTo(v, t) {
+  return new Promise((res) => {
+    let done = false;
+    const finish = () => { if (done) return; done = true; clearTimeout(timer); v.removeEventListener("seeked", onSeeked); res(); };
+    const onSeeked = () => {
+      // wait until the decoded frame is actually presented where supported
+      if (v.requestVideoFrameCallback) { v.requestVideoFrameCallback(finish); setTimeout(finish, 120); } else finish();
+    };
+    const timer = setTimeout(finish, 4000);
+    v.addEventListener("seeked", onSeeked);
+    v.currentTime = t;
+  });
+}
+
 async function videoSources(file, count) {
   const v = document.createElement("video");
   v.muted = true; v.playsInline = true; v.preload = "auto";
   v.src = URL.createObjectURL(file);
-  await waitEvent(v, "loadedmetadata");
+  await waitEvent(v, "loadeddata");
   try { await v.play(); v.pause(); } catch (e) { /* some browsers refuse; seeking still works */ }
   const dur = v.duration;
-  if (!isFinite(dur) || dur <= 0) throw new Error("Video has no readable duration");
+  if (!isFinite(dur) || dur <= 0) throw new Error("this browser can't read the video's length");
+  if (!v.videoWidth) throw new Error("this browser can't decode the video");
   const n = Math.max(1, Math.min(count, Math.floor(dur * 30)));
   const out = [];
   for (let i = 0; i < n; i++) {
@@ -316,9 +331,7 @@ async function videoSources(file, count) {
     out.push({
       label: `${file.name} @ ${t.toFixed(2)}s`,
       async get() {
-        const p = waitEvent(v, "seeked");
-        v.currentTime = t;
-        await p;
+        await seekTo(v, t);
         return { img: v, w: v.videoWidth, h: v.videoHeight, release() {} };
       },
     });
@@ -341,7 +354,7 @@ function imageSource(file) {
 
 const detCanvas = makeCanvas(1, 1);
 function detectMoon(d) {
-  const scale = Math.min(1, 800 / Math.max(d.w, d.h));
+  const scale = Math.min(1, 1200 / Math.max(d.w, d.h));
   const w = Math.max(1, Math.round(d.w * scale)), h = Math.max(1, Math.round(d.h * scale));
   detCanvas.width = w; detCanvas.height = h;
   const c = ctx2d(detCanvas);
@@ -353,7 +366,10 @@ function detectMoon(d) {
     lum[i] = l; hist[l]++;
   }
   const pct = (p) => { let acc = 0; const lim = n * p; for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= lim) return i; } return 255; };
-  const bg = pct(0.5 * 0.6), hi = pct(0.998);
+  // background = median; peak = ~40th brightest pixel, so a few hot pixels don't count but a tiny Moon does
+  const bg = pct(0.5);
+  let hi = 255;
+  for (let i = 255, acc = 0; i >= 0; i--) { acc += hist[i]; if (acc >= 40) { hi = i; break; } }
   if (hi - bg < 12) return null;
   const t = bg + 0.25 * (hi - bg);
   // largest bright connected component
@@ -522,28 +538,35 @@ function refineShift(Lr, Lf, O, dx0, dy0) {
 /* ---------- pipeline ---------- */
 
 async function run(sources, isSample) {
-  if (state.busy) return;
-  state.busy = true;
+  if (state.busy) { state.pending = sources; state.cancel = true; return; }
+  state.busy = true; state.cancel = false;
   state.sample = !!isSample;
-  $("files").disabled = true;
   try {
     const total = sources.length;
     // pass 1: find the Moon in every frame
     const dets = [];
+    let unreadable = 0;
     for (let i = 0; i < total; i++) {
+      if (state.cancel) return;
       setStatus(`Finding the Moon… ${i + 1}/${total}`, (i / total) * 0.3);
       let d;
-      try { d = await sources[i].get(); } catch (e) { dets.push(null); continue; }
+      try { d = await sources[i].get(); } catch (e) { dets.push(null); unreadable++; continue; }
       dets.push(detectMoon(d));
       d.release();
       await tick();
     }
-    const good = dets.map((d, i) => (d ? i : -1)).filter((i) => i >= 0);
-    if (!good.length) throw new Error("No Moon found. Use photos where the Moon is the brightest thing in frame.");
+    let good = dets.map((d, i) => (d ? i : -1)).filter((i) => i >= 0);
+    if (!good.length) {
+      throw new Error(unreadable === total
+        ? "This browser couldn't open those files. Try JPEG or PNG photos (on iPhone, pick them from Photos so they're converted)."
+        : "No Moon found. Use photos where the Moon is the brightest thing in frame.");
+    }
     const diams = good.map((i) => dets[i].diam).sort((a, b) => a - b);
     const diam = diams[diams.length >> 1];
+    // drop frames where something else (a streetlight, a cloud edge) was picked up instead
+    good = good.filter((i) => Math.abs(dets[i].diam - diam) <= diam * 0.25);
     const side = diam * 1.3;
-    const memCap = Math.floor(Math.sqrt(300e6 / (4 * good.length)));
+    const memCap = Math.floor(Math.sqrt(200e6 / (4 * good.length)));
     const O = Math.max(128, Math.min(+$("outSize").value, Math.round(side), memCap)) & ~1;
     const scale = O / side;
 
@@ -553,6 +576,7 @@ async function run(sources, isSample) {
     c.imageSmoothingEnabled = true; c.imageSmoothingQuality = "high";
     for (let k = 0; k < good.length; k++) {
       const i = good[k], det = dets[i];
+      if (state.cancel) return;
       setStatus(`Cropping and scoring… ${k + 1}/${good.length}`, 0.3 + (k / good.length) * 0.35);
       let d;
       try { d = await sources[i].get(); } catch (e) { continue; }
@@ -566,7 +590,7 @@ async function run(sources, isSample) {
       const L = lumOf(data, O * O);
       const thumb = makeCanvas(72, 72);
       thumb.getContext("2d").drawImage(cc, 0, 0, 72, 72);
-      frames.push({ data, q: sharpness(L, O), thumb, dx: 0, dy: 0, gain: 1, off: false, label: sources[i].label });
+      frames.push({ data, q: sharpness(L, O), thumb, dx: 0, dy: 0, gain: 1, off: false, label: sources[i].label, cx: det.cx, cy: det.cy });
       await tick();
     }
     if (!frames.length) throw new Error("Could not read any frames.");
@@ -576,6 +600,7 @@ async function run(sources, isSample) {
     frames.forEach((f, i) => { if (f.q > frames[ref].q) ref = i; });
     const Lr = lumOf(frames[ref].data, O * O), Fr = spectrum(Lr, O);
     for (let i = 0; i < frames.length; i++) {
+      if (state.cancel) return;
       setStatus(`Aligning… ${i + 1}/${frames.length}`, 0.65 + (i / frames.length) * 0.3);
       if (i === ref) continue;
       const Lf = lumOf(frames[i].data, O * O);
@@ -584,20 +609,24 @@ async function run(sources, isSample) {
       Object.assign(frames[i], refineShift(Lr, Lf, O, dx, dy));
       await tick();
     }
-    state.frames = frames; state.OUT = O; state.refIdx = ref;
+    state.frames = frames; state.OUT = O; state.refIdx = ref; state.cropScale = scale; state.side = side;
     $("sFrames").textContent = frames.length;
     $("sSize").textContent = O;
     const skipped = total - frames.length;
+    if (skipped) $("sFrames").textContent = `${frames.length}/${total}`;
     setStatus("Stacking…", 0.97);
     await tick();
     restack();
-    const what = isSample ? "Sample: 16 synthetic frames. Choose your own photos to replace it." : `Done. ${frames.length} frames aligned${skipped ? `, ${skipped} skipped (no Moon found)` : ""}.`;
+    const what = isSample ? "Sample: 16 synthetic frames. Choose your own photos to replace it."
+      : `Done. ${frames.length} frames aligned${skipped ? `, ${skipped} skipped (${unreadable ? `${unreadable} unreadable, ` : ""}no clear Moon in the rest)` : ""}.`;
     setStatus(what, 1);
   } catch (e) {
     setStatus(e.message || String(e), 0);
   } finally {
     state.busy = false;
-    $("files").disabled = false;
+    const next = state.pending;
+    state.pending = null;
+    if (next) run(next, false);
   }
 }
 
@@ -617,7 +646,7 @@ function sampleInto(f, O, buf) {
     const sy = y + iy, rowOk = sy >= 0 && sy < O - 1;
     for (let x = 0; x < O; x++) {
       const o = (y * O + x) * 3, sx = x + ix;
-      if (!rowOk || sx < 0 || sx >= O - 1) { buf[o] = buf[o + 1] = buf[o + 2] = 0; continue; }
+      if (!rowOk || sx < 0 || sx >= O - 1) { buf[o] = -1; continue; } // not covered by this frame
       const p = (sy * O + sx) * 4, q = p + O * 4;
       buf[o] = src[p] * w00 + src[p + 4] * w10 + src[q] * w01 + src[q + 4] * w11;
       buf[o + 1] = src[p + 1] * w00 + src[p + 5] * w10 + src[q + 1] * w01 + src[q + 5] * w11;
@@ -629,23 +658,26 @@ function sampleInto(f, O, buf) {
 function restack() {
   const O = state.OUT, n = O * O, sel = [...selected()];
   const buf = new Float32Array(n * 3), sum = new Float32Array(n * 3);
-  const lsum = new Float32Array(n), lsq = new Float32Array(n);
+  const lsum = new Float32Array(n), lsq = new Float32Array(n), cov = new Uint16Array(n);
   for (const i of sel) {
     sampleInto(state.frames[i], O, buf);
     for (let p = 0, o = 0; p < n; p++, o += 3) {
+      if (buf[o] < 0) continue;
+      cov[p]++;
       sum[o] += buf[o]; sum[o + 1] += buf[o + 1]; sum[o + 2] += buf[o + 2];
       const l = 0.299 * buf[o] + 0.587 * buf[o + 1] + 0.114 * buf[o + 2];
       lsum[p] += l; lsq[p] += l * l;
     }
   }
   const k = sel.length;
-  for (let o = 0; o < n * 3; o++) sum[o] /= k;
+  for (let p = 0, o = 0; p < n; p++, o += 3) { const c = cov[p] || 1; sum[o] /= c; sum[o + 1] /= c; sum[o + 2] /= c; }
   if ($("method").value === "sigma" && k >= 4) {
     const acc = new Float32Array(n * 3), cnt = new Uint16Array(n);
-    for (let p = 0; p < n; p++) { const m = lsum[p] / k; lsq[p] = 2.2 * Math.sqrt(Math.max(0, lsq[p] / k - m * m)) + 1.5; lsum[p] = m; }
+    for (let p = 0; p < n; p++) { const c = cov[p] || 1, m = lsum[p] / c; lsq[p] = 2.2 * Math.sqrt(Math.max(0, lsq[p] / c - m * m)) + 1.5; lsum[p] = m; }
     for (const i of sel) {
       sampleInto(state.frames[i], O, buf);
       for (let p = 0, o = 0; p < n; p++, o += 3) {
+        if (buf[o] < 0) continue;
         const l = 0.299 * buf[o] + 0.587 * buf[o + 1] + 0.114 * buf[o + 2];
         if (Math.abs(l - lsum[p]) > lsq[p]) continue;
         acc[o] += buf[o]; acc[o + 1] += buf[o + 1]; acc[o + 2] += buf[o + 2]; cnt[p]++;
@@ -867,15 +899,15 @@ function makeMoonTexture(R) {
 }
 function sampleSources(n) {
   const tex = makeMoonTexture(210), W = 900, H = 680, rand = rng(42);
+  const c = makeCanvas(W, H), g = ctx2d(c), small = makeCanvas(1, 1), sg = small.getContext("2d");
   const frames = [];
   for (let i = 0; i < n; i++) frames.push({ jx: (rand() - 0.5) * 120, jy: (rand() - 0.5) * 90, blur: rand() < 0.35 ? 1.6 + rand() * 2 : rand() * 0.6, seed: 1000 + i, ex: 0.9 + rand() * 0.2 });
   return frames.map((p, i) => ({
     label: `sample frame ${i + 1}`,
     async get() {
-      const c = makeCanvas(W, H), g = c.getContext("2d");
       g.fillStyle = "#050608"; g.fillRect(0, 0, W, H);
       const S = tex.width, s = Math.max(16, Math.round(S / (1 + p.blur)));
-      const small = makeCanvas(s, s), sg = small.getContext("2d");
+      small.width = small.height = s;
       sg.imageSmoothingQuality = "high"; sg.drawImage(tex, 0, 0, s, s);
       g.imageSmoothingQuality = "high";
       g.drawImage(small, (W - S) / 2 + p.jx, (H - S) / 2 + p.jy, S, S);
