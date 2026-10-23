@@ -1,0 +1,894 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lunar Stacker</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="theme-color" content="#0c0e13">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Michroma&display=swap">
+<style>
+  /* Layout: one night-sky column on phones; result plate left, controls right on wide screens. Single dark look by choice (used outdoors at night). */
+  :root {
+    --bg: #0c0e13;
+    --panel: #141821;
+    --line: #262c39;
+    --fg: #e7e3da;
+    --muted: #8d929e;
+    --accent: #d8b878;
+    --bad: #c9735f;
+    --font-display: "Michroma", "Eurostile", "Arial Black", sans-serif;
+    --font-body: "Figtree", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { background: var(--bg); }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.5 var(--font-body);
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 20px 48px;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; display: grid; gap: 20px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; }
+  h1 { font: 400 1.25rem/1.2 var(--font-display); letter-spacing: 0.08em; margin: 0; text-wrap: balance; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--muted); margin: 0; font-size: 0.875rem; }
+  h2 { font: 600 0.75rem/1 var(--font-body); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 0; }
+
+  .layout { display: grid; gap: 20px; }
+  @media (min-width: 900px) { .layout { grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr); align-items: start; } }
+
+  .plate {
+    position: relative; background: #000; border: 1px solid var(--line); border-radius: 6px;
+    aspect-ratio: 1 / 1; max-width: 100%; overflow: hidden; display: grid; place-items: center;
+  }
+  .plate canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .plate .tag {
+    position: absolute; left: 10px; top: 10px; font: 500 0.6875rem/1 var(--font-mono);
+    color: var(--muted); background: rgba(12, 14, 19, 0.75); padding: 6px 8px; border-radius: 4px; letter-spacing: 0.04em;
+  }
+  .plate .empty { color: var(--muted); text-align: center; padding: 24px; max-width: 32ch; }
+
+  .col { display: grid; gap: 16px; min-width: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 16px; display: grid; gap: 14px; min-width: 0; }
+
+  .pick {
+    display: grid; gap: 4px; text-align: center; padding: 18px 12px; border: 1px dashed var(--accent);
+    border-radius: 6px; cursor: pointer; color: var(--fg); background: transparent; font: inherit;
+  }
+  .pick strong { font-weight: 600; color: var(--accent); font-size: 1rem; }
+  .pick small { color: var(--muted); }
+  .pick:focus-within, .pick:hover { background: rgba(216, 184, 120, 0.06); }
+  .pick input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .field { display: grid; gap: 6px; min-width: 0; }
+  .field label, .lbl { font-size: 0.8125rem; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+  .field output { font: 500 0.8125rem var(--font-mono); color: var(--fg); font-variant-numeric: tabular-nums; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px 16px; }
+
+  select, input[type="number"] {
+    font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 4px; padding: 8px 10px; width: 100%;
+  }
+  input[type="range"] { width: 100%; accent-color: var(--accent); height: 28px; }
+
+  button.btn {
+    font: 600 0.9375rem var(--font-body); border-radius: 4px; padding: 11px 16px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg); touch-action: manipulation;
+    -webkit-user-select: none; user-select: none;
+  }
+  button.btn.primary { background: var(--accent); color: #1a1408; border-color: var(--accent); }
+  button.btn:disabled { opacity: 0.45; cursor: default; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .progress { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  .progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.15s; }
+  .status { font: 400 0.8125rem/1.4 var(--font-mono); color: var(--muted); min-height: 1.4em; overflow-wrap: anywhere; }
+
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .stats div { display: grid; gap: 2px; }
+  .stats b { font: 500 1.125rem var(--font-mono); font-variant-numeric: tabular-nums; }
+  .stats span { font-size: 0.75rem; color: var(--muted); }
+
+  .strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; }
+  .thumb {
+    position: relative; padding: 0; border: 1px solid var(--line); border-radius: 4px; background: #000;
+    cursor: pointer; aspect-ratio: 1 / 1; overflow: hidden;
+  }
+  .thumb canvas { width: 100%; height: 100%; display: block; }
+  .thumb .q {
+    position: absolute; left: 0; right: 0; bottom: 0; font: 500 0.625rem/1 var(--font-mono);
+    padding: 3px 4px; background: rgba(12, 14, 19, 0.8); color: var(--fg); text-align: left;
+  }
+  .thumb.ref { border-color: var(--accent); }
+  .thumb.out canvas { opacity: 0.28; }
+  .thumb.out .q { color: var(--bad); text-decoration: line-through; }
+
+  details { border-top: 1px solid var(--line); padding-top: 12px; }
+  summary { cursor: pointer; font-weight: 600; }
+  details ul { margin: 10px 0 0; padding-left: 1.1em; color: var(--muted); display: grid; gap: 6px; max-width: 65ch; }
+  details li b { color: var(--fg); font-weight: 600; }
+
+  .modal {
+    position: fixed; inset: 0; background: rgba(5, 6, 9, 0.92); z-index: 20; display: grid; place-items: center;
+    padding: calc(16px + env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+  }
+  .modal .box { display: grid; gap: 12px; max-width: 560px; width: 100%; justify-items: center; }
+  .modal img { max-height: 65vh; width: auto; max-width: 100%; border: 1px solid var(--line); border-radius: 4px; -webkit-touch-callout: default; }
+  .modal p { margin: 0; color: var(--muted); text-align: center; font-size: 0.875rem; }
+  @media (prefers-reduced-motion: reduce) { .progress i { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>LUNAR <span>STACKER</span></h1>
+    <p class="sub">Align and stack phone shots of the Moon. Everything runs on your device.</p>
+  </header>
+
+  <div class="layout">
+    <div class="col">
+      <div class="plate">
+        <canvas id="view" hidden></canvas>
+        <div class="empty" id="empty">Choose a burst of Moon photos or a short video to start.</div>
+        <div class="tag" id="tag" hidden></div>
+      </div>
+      <div class="row">
+        <button class="btn" id="compare" disabled>Hold to compare with best frame</button>
+        <button class="btn primary" id="save" disabled>Save image</button>
+      </div>
+    </div>
+
+    <div class="col">
+      <section class="panel">
+        <label class="pick" for="files">
+          <strong>Choose photos or a video</strong>
+          <small>JPEG, PNG, HEIC (converted by your phone), MP4, MOV</small>
+          <input id="files" type="file" accept="image/*,video/*" multiple>
+        </label>
+        <div class="grid2">
+          <div class="field">
+            <label for="vidFrames">Frames per video</label>
+            <input id="vidFrames" type="number" min="5" max="300" value="60" inputmode="numeric">
+          </div>
+          <div class="field">
+            <label for="outSize">Max output size</label>
+            <select id="outSize">
+              <option value="800">800 px</option>
+              <option value="1200" selected>1200 px</option>
+              <option value="1600">1600 px</option>
+            </select>
+          </div>
+        </div>
+        <div class="progress"><i id="bar"></i></div>
+        <div class="status" id="status" role="status" aria-live="polite">Loading sample…</div>
+      </section>
+
+      <section class="panel">
+        <h2>Stack</h2>
+        <div class="stats">
+          <div><b id="sFrames">–</b><span>frames found</span></div>
+          <div><b id="sUsed">–</b><span>stacked</span></div>
+          <div><b id="sSize">–</b><span>output px</span></div>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label for="keep">Keep sharpest <output id="keepV">50%</output></label>
+            <input id="keep" type="range" min="10" max="100" step="5" value="50">
+          </div>
+          <div class="field">
+            <label for="method">Method</label>
+            <select id="method">
+              <option value="sigma" selected>Sigma-clipped mean</option>
+              <option value="mean">Plain mean</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Process</h2>
+        <div class="grid2">
+          <div class="field">
+            <label for="sharpFine">Fine detail <output id="sharpFineV"></output></label>
+            <input id="sharpFine" type="range" min="0" max="4" step="0.1" value="1.2">
+          </div>
+          <div class="field">
+            <label for="sharpCoarse">Craters &amp; maria <output id="sharpCoarseV"></output></label>
+            <input id="sharpCoarse" type="range" min="0" max="3" step="0.1" value="0.6">
+          </div>
+          <div class="field">
+            <label for="gamma">Midtones (gamma) <output id="gammaV"></output></label>
+            <input id="gamma" type="range" min="0.5" max="2" step="0.05" value="1">
+          </div>
+          <div class="field">
+            <label for="black">Black point <output id="blackV"></output></label>
+            <input id="black" type="range" min="-0.1" max="0.3" step="0.01" value="0">
+          </div>
+          <div class="field">
+            <label for="sat">Colour (mineral moon) <output id="satV"></output></label>
+            <input id="sat" type="range" min="0" max="4" step="0.1" value="1">
+          </div>
+          <div class="field">
+            <label for="bright">Highlights <output id="brightV"></output></label>
+            <input id="bright" type="range" min="0.6" max="1.4" step="0.02" value="1">
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="row" style="justify-content: space-between;">
+          <h2>Frames</h2>
+          <span class="sub" style="font-size: 0.75rem;">Tap a frame to drop or restore it</span>
+        </div>
+        <div class="strip" id="strip"></div>
+        <details>
+          <summary>Shooting tips</summary>
+          <ul>
+            <li><b>Lock focus and exposure.</b> Tap and hold on the Moon (AE/AF lock), then drag exposure down until the bright limb shows detail rather than white.</li>
+            <li><b>Use your longest lens.</b> 3×–5× optical zoom, or hold the phone to binoculars or a telescope eyepiece. Avoid digital zoom past the optical limit.</li>
+            <li><b>Shoot 20–60 frames.</b> Burst mode or a 10-second 4K video both work. More frames means less noise.</li>
+            <li><b>Steady the phone.</b> A tripod or a wall helps; use the timer or volume button so the tap doesn't shake it.</li>
+            <li><b>Stay at one zoom level.</b> The stacker corrects drift but not rotation or zoom changes.</li>
+          </ul>
+        </details>
+      </section>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="box">
+    <img id="outImg" alt="Stacked Moon image">
+    <p>Long-press the image to save it to your photos, or use a button below.</p>
+    <div class="row" style="justify-content: center;">
+      <button class="btn primary" id="share" hidden>Share…</button>
+      <button class="btn" id="download">Download PNG</button>
+      <button class="btn" id="closeModal">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const tick = () => new Promise((r) => setTimeout(r, 0));
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+
+const state = {
+  frames: [], // {thumb, data:Uint8ClampedArray, q, dx, dy, gain, off}
+  OUT: 0,
+  refIdx: -1,
+  stack: null, // Float32Array RGB, 0..255
+  rendered: null, // ImageData
+  sample: false,
+  busy: false,
+};
+
+function setStatus(msg, frac) {
+  $("status").textContent = msg;
+  if (frac != null) $("bar").style.width = (clamp(frac, 0, 1) * 100).toFixed(1) + "%";
+}
+
+function ctx2d(c) { return c.getContext("2d", { willReadFrequently: true }); }
+function makeCanvas(w, h) { const c = document.createElement("canvas"); c.width = w; c.height = h; return c; }
+
+/* ---------- sources ---------- */
+
+async function loadBitmap(blob) {
+  try { return await createImageBitmap(blob); } catch (e) { /* fall through */ }
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    img.decoding = "async";
+    img.src = url;
+    await img.decode();
+    return img;
+  } finally { URL.revokeObjectURL(url); }
+}
+
+function waitEvent(el, name) { return new Promise((res, rej) => {
+  const ok = () => { el.removeEventListener("error", bad); res(); };
+  const bad = () => { el.removeEventListener(name, ok); rej(new Error("Could not read this video")); };
+  el.addEventListener(name, ok, { once: true });
+  el.addEventListener("error", bad, { once: true });
+}); }
+
+async function videoSources(file, count) {
+  const v = document.createElement("video");
+  v.muted = true; v.playsInline = true; v.preload = "auto";
+  v.src = URL.createObjectURL(file);
+  await waitEvent(v, "loadedmetadata");
+  try { await v.play(); v.pause(); } catch (e) { /* some browsers refuse; seeking still works */ }
+  const dur = v.duration;
+  if (!isFinite(dur) || dur <= 0) throw new Error("Video has no readable duration");
+  const n = Math.max(1, Math.min(count, Math.floor(dur * 30)));
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const t = (dur * (i + 0.5)) / n;
+    out.push({
+      label: `${file.name} @ ${t.toFixed(2)}s`,
+      async get() {
+        const p = waitEvent(v, "seeked");
+        v.currentTime = t;
+        await p;
+        return { img: v, w: v.videoWidth, h: v.videoHeight, release() {} };
+      },
+    });
+  }
+  return out;
+}
+
+function imageSource(file) {
+  return {
+    label: file.name,
+    async get() {
+      const b = await loadBitmap(file);
+      const w = b.naturalWidth || b.width, h = b.naturalHeight || b.height;
+      return { img: b, w, h, release() { if (b.close) b.close(); } };
+    },
+  };
+}
+
+/* ---------- detection ---------- */
+
+const detCanvas = makeCanvas(1, 1);
+function detectMoon(d) {
+  const scale = Math.min(1, 800 / Math.max(d.w, d.h));
+  const w = Math.max(1, Math.round(d.w * scale)), h = Math.max(1, Math.round(d.h * scale));
+  detCanvas.width = w; detCanvas.height = h;
+  const c = ctx2d(detCanvas);
+  c.drawImage(d.img, 0, 0, w, h);
+  const px = c.getImageData(0, 0, w, h).data;
+  const n = w * h, lum = new Uint8Array(n), hist = new Uint32Array(256);
+  for (let i = 0, j = 0; i < n; i++, j += 4) {
+    const l = (px[j] * 77 + px[j + 1] * 150 + px[j + 2] * 29) >> 8;
+    lum[i] = l; hist[l]++;
+  }
+  const pct = (p) => { let acc = 0; const lim = n * p; for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= lim) return i; } return 255; };
+  const bg = pct(0.5 * 0.6), hi = pct(0.998);
+  if (hi - bg < 12) return null;
+  const t = bg + 0.25 * (hi - bg);
+  // largest bright connected component
+  const lab = new Int32Array(n), stack = new Int32Array(n);
+  let best = null, id = 0;
+  for (let s = 0; s < n; s++) {
+    if (lab[s] || lum[s] <= t) continue;
+    id++;
+    let sp = 0, area = 0, x0 = w, x1 = 0, y0 = h, y1 = 0;
+    stack[sp++] = s; lab[s] = id;
+    while (sp) {
+      const p = stack[--sp], x = p % w, y = (p - x) / w;
+      area++;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      if (x > 0 && !lab[p - 1] && lum[p - 1] > t) { lab[p - 1] = id; stack[sp++] = p - 1; }
+      if (x < w - 1 && !lab[p + 1] && lum[p + 1] > t) { lab[p + 1] = id; stack[sp++] = p + 1; }
+      if (y > 0 && !lab[p - w] && lum[p - w] > t) { lab[p - w] = id; stack[sp++] = p - w; }
+      if (y < h - 1 && !lab[p + w] && lum[p + w] > t) { lab[p + w] = id; stack[sp++] = p + w; }
+    }
+    if (!best || area > best.area) best = { area, x0, x1, y0, y1 };
+  }
+  if (!best || best.area < 30) return null;
+  return {
+    cx: (best.x0 + best.x1 + 1) / 2 / scale,
+    cy: (best.y0 + best.y1 + 1) / 2 / scale,
+    diam: Math.max(best.x1 - best.x0 + 1, best.y1 - best.y0 + 1) / scale,
+  };
+}
+
+/* ---------- per-frame measures ---------- */
+
+function lumOf(rgba, n) {
+  const L = new Float32Array(n);
+  for (let i = 0, j = 0; i < n; i++, j += 4) L[i] = 0.299 * rgba[j] + 0.587 * rgba[j + 1] + 0.114 * rgba[j + 2];
+  return L;
+}
+
+function sharpness(L, O) {
+  // variance of Laplacian on a 2x-binned image, over the lit disk, normalised by brightness
+  const w = O >> 1, B = new Float32Array(w * w);
+  let max = 0;
+  for (let y = 0; y < w; y++) for (let x = 0; x < w; x++) {
+    const i = 2 * y * O + 2 * x;
+    const v = (L[i] + L[i + 1] + L[i + O] + L[i + O + 1]) * 0.25;
+    B[y * w + x] = v; if (v > max) max = v;
+  }
+  const thr = max * 0.2;
+  let s = 0, s2 = 0, m = 0, k = 0;
+  for (let y = 1; y < w - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x, v = B[i];
+    if (v < thr) continue;
+    const lap = B[i - 1] + B[i + 1] + B[i - w] + B[i + w] - 4 * v;
+    s += lap; s2 += lap * lap; m += v; k++;
+  }
+  if (!k) return 0;
+  m /= k;
+  const varL = s2 / k - (s / k) ** 2;
+  return (varL / (m * m)) * 1e4;
+}
+
+/* ---------- FFT phase correlation ---------- */
+
+const N = 256;
+const cosT = new Float64Array(N / 2), sinT = new Float64Array(N / 2);
+for (let i = 0; i < N / 2; i++) { cosT[i] = Math.cos((2 * Math.PI * i) / N); sinT[i] = Math.sin((2 * Math.PI * i) / N); }
+const rev = new Uint16Array(N);
+for (let i = 0, bits = Math.log2(N); i < N; i++) { let r = 0; for (let b = 0; b < bits; b++) r |= ((i >> b) & 1) << (bits - 1 - b); rev[i] = r; }
+const hann = new Float64Array(N);
+for (let i = 0; i < N; i++) hann[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1));
+
+function fft1(re, im, inv) {
+  for (let i = 0; i < N; i++) { const j = rev[i]; if (j > i) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; } }
+  for (let len = 2; len <= N; len <<= 1) {
+    const half = len >> 1, step = N / len;
+    for (let i = 0; i < N; i += len) for (let j = 0; j < half; j++) {
+      const wr = cosT[j * step], wi = inv ? sinT[j * step] : -sinT[j * step];
+      const a = i + j, b = a + half;
+      const xr = re[b] * wr - im[b] * wi, xi = re[b] * wi + im[b] * wr;
+      re[b] = re[a] - xr; im[b] = im[a] - xi; re[a] += xr; im[a] += xi;
+    }
+  }
+}
+function fft2(re, im, inv) {
+  const tr = new Float64Array(N), ti = new Float64Array(N);
+  for (let y = 0; y < N; y++) {
+    const o = y * N;
+    for (let x = 0; x < N; x++) { tr[x] = re[o + x]; ti[x] = im[o + x]; }
+    fft1(tr, ti, inv);
+    for (let x = 0; x < N; x++) { re[o + x] = tr[x]; im[o + x] = ti[x]; }
+  }
+  for (let x = 0; x < N; x++) {
+    for (let y = 0; y < N; y++) { tr[y] = re[y * N + x]; ti[y] = im[y * N + x]; }
+    fft1(tr, ti, inv);
+    for (let y = 0; y < N; y++) { re[y * N + x] = tr[y]; im[y * N + x] = ti[y]; }
+  }
+}
+function spectrum(L, O) {
+  const re = new Float64Array(N * N), im = new Float64Array(N * N), cnt = new Float64Array(N * N);
+  for (let y = 0; y < O; y++) {
+    const by = Math.floor((y * N) / O) * N;
+    for (let x = 0; x < O; x++) { const b = by + Math.floor((x * N) / O); re[b] += L[y * O + x]; cnt[b]++; }
+  }
+  let mean = 0;
+  for (let i = 0; i < N * N; i++) { re[i] /= cnt[i] || 1; mean += re[i]; }
+  mean /= N * N;
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) re[y * N + x] = (re[y * N + x] - mean) * hann[x] * hann[y];
+  fft2(re, im, false);
+  return { re, im };
+}
+function phaseShift(Fr, Ff, O) {
+  const re = new Float64Array(N * N), im = new Float64Array(N * N);
+  for (let i = 0; i < N * N; i++) {
+    const a = Ff.re[i], b = Ff.im[i], c = Fr.re[i], d = Fr.im[i];
+    const r = a * c + b * d, q = b * c - a * d, m = Math.hypot(r, q) + 1e-9;
+    re[i] = r / m; im[i] = q / m;
+  }
+  fft2(re, im, true);
+  let bi = 0;
+  for (let i = 1; i < N * N; i++) if (re[i] > re[bi]) bi = i;
+  const px = bi % N, py = (bi - px) / N;
+  const at = (x, y) => re[((y + N) % N) * N + ((x + N) % N)];
+  const sub = (m, c, p) => { const den = m - 2 * c + p; return den < 0 ? clamp((m - p) / (2 * den), -0.5, 0.5) : 0; };
+  let fx = px + sub(at(px - 1, py), at(px, py), at(px + 1, py));
+  let fy = py + sub(at(px, py - 1), at(px, py), at(px, py + 1));
+  if (fx > N / 2) fx -= N; if (fy > N / 2) fy -= N;
+  return [fx * (O / N), fy * (O / N)];
+}
+
+function refineShift(Lr, Lf, O, dx0, dy0) {
+  const lim = Math.round(O * 0.12);
+  const m0 = Math.round(O * 0.14), m1 = O - m0;
+  let sr = 0, sf = 0;
+  for (let y = m0; y < m1; y += 3) for (let x = m0; x < m1; x += 3) { sr += Lr[y * O + x]; sf += Lf[y * O + x]; }
+  const gain = sf > 0 ? sr / sf : 1;
+  const memo = new Map();
+  const cost = (ox, oy) => {
+    const key = ox * 4096 + oy;
+    if (memo.has(key)) return memo.get(key);
+    let s = 0;
+    for (let y = m0; y < m1; y += 2) {
+      const ro = y * O, fo = (y + oy) * O + ox;
+      for (let x = m0; x < m1; x += 2) { const e = Lr[ro + x] - gain * Lf[fo + x]; s += e * e; }
+    }
+    memo.set(key, s);
+    return s;
+  };
+  let ox = clamp(Math.round(dx0), -lim, lim), oy = clamp(Math.round(dy0), -lim, lim);
+  for (let it = 0; it < 12; it++) {
+    let bx = ox, by = oy, bc = cost(ox, oy);
+    for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) {
+      const nx = ox + i, ny = oy + j;
+      if (Math.abs(nx) > lim || Math.abs(ny) > lim) continue;
+      const c = cost(nx, ny);
+      if (c < bc) { bc = c; bx = nx; by = ny; }
+    }
+    if (bx === ox && by === oy) break;
+    ox = bx; oy = by;
+  }
+  const c0 = cost(ox, oy);
+  const sub = (m, p) => { const den = m - 2 * c0 + p; return den > 0 ? clamp((m - p) / (2 * den), -0.5, 0.5) : 0; };
+  const fx = Math.abs(ox) < lim ? sub(cost(ox - 1, oy), cost(ox + 1, oy)) : 0;
+  const fy = Math.abs(oy) < lim ? sub(cost(ox, oy - 1), cost(ox, oy + 1)) : 0;
+  return { dx: ox + fx, dy: oy + fy, gain };
+}
+
+/* ---------- pipeline ---------- */
+
+async function run(sources, isSample) {
+  if (state.busy) return;
+  state.busy = true;
+  state.sample = !!isSample;
+  $("files").disabled = true;
+  try {
+    const total = sources.length;
+    // pass 1: find the Moon in every frame
+    const dets = [];
+    for (let i = 0; i < total; i++) {
+      setStatus(`Finding the Moon… ${i + 1}/${total}`, (i / total) * 0.3);
+      let d;
+      try { d = await sources[i].get(); } catch (e) { dets.push(null); continue; }
+      dets.push(detectMoon(d));
+      d.release();
+      await tick();
+    }
+    const good = dets.map((d, i) => (d ? i : -1)).filter((i) => i >= 0);
+    if (!good.length) throw new Error("No Moon found. Use photos where the Moon is the brightest thing in frame.");
+    const diams = good.map((i) => dets[i].diam).sort((a, b) => a - b);
+    const diam = diams[diams.length >> 1];
+    const side = diam * 1.3;
+    const memCap = Math.floor(Math.sqrt(300e6 / (4 * good.length)));
+    const O = Math.max(128, Math.min(+$("outSize").value, Math.round(side), memCap)) & ~1;
+    const scale = O / side;
+
+    // pass 2: crop, score
+    const frames = [];
+    const cc = makeCanvas(O, O), c = ctx2d(cc);
+    c.imageSmoothingEnabled = true; c.imageSmoothingQuality = "high";
+    for (let k = 0; k < good.length; k++) {
+      const i = good[k], det = dets[i];
+      setStatus(`Cropping and scoring… ${k + 1}/${good.length}`, 0.3 + (k / good.length) * 0.35);
+      let d;
+      try { d = await sources[i].get(); } catch (e) { continue; }
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.fillStyle = "#000"; c.fillRect(0, 0, O, O);
+      c.setTransform(scale, 0, 0, scale, -(det.cx - side / 2) * scale, -(det.cy - side / 2) * scale);
+      c.drawImage(d.img, 0, 0, d.w, d.h);
+      d.release();
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      const data = c.getImageData(0, 0, O, O).data;
+      const L = lumOf(data, O * O);
+      const thumb = makeCanvas(72, 72);
+      thumb.getContext("2d").drawImage(cc, 0, 0, 72, 72);
+      frames.push({ data, q: sharpness(L, O), thumb, dx: 0, dy: 0, gain: 1, off: false, label: sources[i].label });
+      await tick();
+    }
+    if (!frames.length) throw new Error("Could not read any frames.");
+
+    // reference = sharpest frame
+    let ref = 0;
+    frames.forEach((f, i) => { if (f.q > frames[ref].q) ref = i; });
+    const Lr = lumOf(frames[ref].data, O * O), Fr = spectrum(Lr, O);
+    for (let i = 0; i < frames.length; i++) {
+      setStatus(`Aligning… ${i + 1}/${frames.length}`, 0.65 + (i / frames.length) * 0.3);
+      if (i === ref) continue;
+      const Lf = lumOf(frames[i].data, O * O);
+      let [dx, dy] = phaseShift(Fr, spectrum(Lf, O), O);
+      if (Math.hypot(dx, dy) > O * 0.12) { dx = 0; dy = 0; }
+      Object.assign(frames[i], refineShift(Lr, Lf, O, dx, dy));
+      await tick();
+    }
+    state.frames = frames; state.OUT = O; state.refIdx = ref;
+    $("sFrames").textContent = frames.length;
+    $("sSize").textContent = O;
+    const skipped = total - frames.length;
+    setStatus("Stacking…", 0.97);
+    await tick();
+    restack();
+    const what = isSample ? "Sample: 16 synthetic frames. Choose your own photos to replace it." : `Done. ${frames.length} frames aligned${skipped ? `, ${skipped} skipped (no Moon found)` : ""}.`;
+    setStatus(what, 1);
+  } catch (e) {
+    setStatus(e.message || String(e), 0);
+  } finally {
+    state.busy = false;
+    $("files").disabled = false;
+  }
+}
+
+function selected() {
+  const fs = state.frames;
+  const order = fs.map((f, i) => i).filter((i) => !fs[i].off).sort((a, b) => fs[b].q - fs[a].q);
+  const n = Math.max(1, Math.round((order.length * +$("keep").value) / 100));
+  return new Set(order.slice(0, n));
+}
+
+function sampleInto(f, O, buf) {
+  // bilinear sample of frame at (x+dx, y+dy), brightness matched to reference
+  const src = f.data, g = f.gain;
+  const ix = Math.floor(f.dx), iy = Math.floor(f.dy), ax = f.dx - ix, ay = f.dy - iy;
+  const w00 = (1 - ax) * (1 - ay) * g, w10 = ax * (1 - ay) * g, w01 = (1 - ax) * ay * g, w11 = ax * ay * g;
+  for (let y = 0; y < O; y++) {
+    const sy = y + iy, rowOk = sy >= 0 && sy < O - 1;
+    for (let x = 0; x < O; x++) {
+      const o = (y * O + x) * 3, sx = x + ix;
+      if (!rowOk || sx < 0 || sx >= O - 1) { buf[o] = buf[o + 1] = buf[o + 2] = 0; continue; }
+      const p = (sy * O + sx) * 4, q = p + O * 4;
+      buf[o] = src[p] * w00 + src[p + 4] * w10 + src[q] * w01 + src[q + 4] * w11;
+      buf[o + 1] = src[p + 1] * w00 + src[p + 5] * w10 + src[q + 1] * w01 + src[q + 5] * w11;
+      buf[o + 2] = src[p + 2] * w00 + src[p + 6] * w10 + src[q + 2] * w01 + src[q + 6] * w11;
+    }
+  }
+}
+
+function restack() {
+  const O = state.OUT, n = O * O, sel = [...selected()];
+  const buf = new Float32Array(n * 3), sum = new Float32Array(n * 3);
+  const lsum = new Float32Array(n), lsq = new Float32Array(n);
+  for (const i of sel) {
+    sampleInto(state.frames[i], O, buf);
+    for (let p = 0, o = 0; p < n; p++, o += 3) {
+      sum[o] += buf[o]; sum[o + 1] += buf[o + 1]; sum[o + 2] += buf[o + 2];
+      const l = 0.299 * buf[o] + 0.587 * buf[o + 1] + 0.114 * buf[o + 2];
+      lsum[p] += l; lsq[p] += l * l;
+    }
+  }
+  const k = sel.length;
+  for (let o = 0; o < n * 3; o++) sum[o] /= k;
+  if ($("method").value === "sigma" && k >= 4) {
+    const acc = new Float32Array(n * 3), cnt = new Uint16Array(n);
+    for (let p = 0; p < n; p++) { const m = lsum[p] / k; lsq[p] = 2.2 * Math.sqrt(Math.max(0, lsq[p] / k - m * m)) + 1.5; lsum[p] = m; }
+    for (const i of sel) {
+      sampleInto(state.frames[i], O, buf);
+      for (let p = 0, o = 0; p < n; p++, o += 3) {
+        const l = 0.299 * buf[o] + 0.587 * buf[o + 1] + 0.114 * buf[o + 2];
+        if (Math.abs(l - lsum[p]) > lsq[p]) continue;
+        acc[o] += buf[o]; acc[o + 1] += buf[o + 1]; acc[o + 2] += buf[o + 2]; cnt[p]++;
+      }
+    }
+    for (let p = 0, o = 0; p < n; p++, o += 3) {
+      if (!cnt[p]) continue;
+      sum[o] = acc[o] / cnt[p]; sum[o + 1] = acc[o + 1] / cnt[p]; sum[o + 2] = acc[o + 2] / cnt[p];
+    }
+  }
+  state.stack = sum;
+  $("sUsed").textContent = k;
+  drawStrip(new Set(sel));
+  render();
+}
+
+/* ---------- post-processing ---------- */
+
+function boxBlur(src, dst, w, h, r) {
+  const tmp = new Float32Array(w * h), d = 2 * r + 1;
+  for (let y = 0; y < h; y++) {
+    const o = y * w; let s = 0;
+    for (let x = -r; x <= r; x++) s += src[o + clamp(x, 0, w - 1)];
+    for (let x = 0; x < w; x++) {
+      tmp[o + x] = s / d;
+      s += src[o + Math.min(x + r + 1, w - 1)] - src[o + Math.max(x - r, 0)];
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let s = 0;
+    for (let y = -r; y <= r; y++) s += tmp[clamp(y, 0, h - 1) * w + x];
+    for (let y = 0; y < h; y++) {
+      dst[y * w + x] = s / d;
+      s += tmp[Math.min(y + r + 1, h - 1) * w + x] - tmp[Math.max(y - r, 0) * w + x];
+    }
+  }
+}
+function gauss(src, w, h, r) {
+  const a = new Float32Array(w * h), b = new Float32Array(w * h);
+  boxBlur(src, a, w, h, r); boxBlur(a, b, w, h, r); boxBlur(b, a, w, h, r);
+  return a;
+}
+
+function render() {
+  const S = state.stack; if (!S) return;
+  const O = state.OUT, n = O * O;
+  const L = new Float32Array(n);
+  for (let p = 0, o = 0; p < n; p++, o += 3) L[p] = 0.299 * S[o] + 0.587 * S[o + 1] + 0.114 * S[o + 2];
+  const fine = +$("sharpFine").value, coarse = +$("sharpCoarse").value;
+  const g1 = gauss(L, O, O, 1), g4 = gauss(L, O, O, 4);
+  // levels from the lit part of the stack
+  const hist = new Uint32Array(1024);
+  let peak = 0;
+  for (let p = 0; p < n; p++) { const v = L[p]; if (v > peak) peak = v; hist[Math.min(1023, Math.floor(v * 4))]++; }
+  let acc = 0, hi = peak; const lim = n * 0.9995;
+  for (let i = 0; i < 1024; i++) { acc += hist[i]; if (acc >= lim) { hi = (i + 1) / 4; break; } }
+  hi = Math.max(1, hi / +$("bright").value);
+  const lo = hi * +$("black").value + 2;
+  const inv = 1 / Math.max(1e-3, hi - lo), gam = 1 / +$("gamma").value, sat = +$("sat").value;
+  const img = new ImageData(O, O), D = img.data;
+  for (let p = 0, o = 0, j = 0; p < n; p++, o += 3, j += 4) {
+    const l = L[p], delta = fine * (l - g1[p]) + coarse * (g1[p] - g4[p]) * 1.5;
+    for (let c = 0; c < 3; c++) {
+      let v = l + sat * (S[o + c] - l) + delta;
+      v = (v - lo) * inv;
+      D[j + c] = v <= 0 ? 0 : v >= 1 ? 255 : Math.pow(v, gam) * 255;
+    }
+    D[j + 3] = 255;
+  }
+  state.rendered = img;
+  const cv = $("view");
+  cv.width = O; cv.height = O;
+  cv.getContext("2d").putImageData(img, 0, 0);
+  cv.hidden = false; $("empty").hidden = true;
+  $("tag").hidden = false;
+  $("tag").textContent = `${state.sample ? "SAMPLE · " : ""}STACK OF ${$("sUsed").textContent}`;
+  $("compare").disabled = false; $("save").disabled = false;
+}
+
+function drawStrip(sel) {
+  const strip = $("strip");
+  strip.textContent = "";
+  const order = state.frames.map((f, i) => i).sort((a, b) => state.frames[b].q - state.frames[a].q);
+  for (const i of order) {
+    const f = state.frames[i];
+    const b = document.createElement("button");
+    b.className = "thumb" + (i === state.refIdx ? " ref" : "") + (sel.has(i) ? "" : " out");
+    b.title = f.label + (i === state.refIdx ? " (reference)" : "");
+    b.setAttribute("aria-label", `${f.label}, sharpness ${f.q.toFixed(1)}, ${sel.has(i) ? "stacked" : "not stacked"}`);
+    b.appendChild(f.thumb);
+    const q = document.createElement("span");
+    q.className = "q"; q.textContent = f.q.toFixed(1);
+    b.appendChild(q);
+    b.onclick = () => {
+      if (state.busy) return;
+      f.off = !f.off;
+      if (state.frames.every((x) => x.off)) f.off = false;
+      queueRestack();
+    };
+    strip.appendChild(b);
+  }
+}
+
+let rq = 0, rr = 0;
+function queueRestack() { clearTimeout(rq); rq = setTimeout(() => { if (state.frames.length) restack(); }, 150); }
+function queueRender() { cancelAnimationFrame(rr); rr = requestAnimationFrame(render); }
+
+/* ---------- controls ---------- */
+
+const fmt = { keep: (v) => v + "%", sharpFine: (v) => (+v).toFixed(1), sharpCoarse: (v) => (+v).toFixed(1), gamma: (v) => (+v).toFixed(2), black: (v) => (+v).toFixed(2), sat: (v) => (+v).toFixed(1) + "×", bright: (v) => (+v).toFixed(2) };
+for (const id of Object.keys(fmt)) {
+  const el = $(id), out = $(id + "V");
+  const upd = () => { out.textContent = fmt[id](el.value); };
+  upd();
+  el.addEventListener("input", () => { upd(); if (id === "keep") queueRestack(); else queueRender(); });
+}
+$("method").addEventListener("change", queueRestack);
+
+$("files").addEventListener("change", async (e) => {
+  const files = [...e.target.files];
+  e.target.value = "";
+  if (!files.length) return;
+  const count = clamp(+$("vidFrames").value || 60, 5, 300);
+  const sources = [];
+  for (const f of files) {
+    if (f.type.startsWith("video/") || /\.(mp4|mov|m4v|webm)$/i.test(f.name)) {
+      try { sources.push(...(await videoSources(f, count))); } catch (err) { setStatus(`${f.name}: ${err.message}`); }
+    } else sources.push(imageSource(f));
+  }
+  if (sources.length) run(sources, false);
+});
+
+const cmp = $("compare");
+const showRef = (e) => {
+  e.preventDefault();
+  const f = state.frames[state.refIdx]; if (!f) return;
+  const img = new ImageData(new Uint8ClampedArray(f.data), state.OUT, state.OUT);
+  $("view").getContext("2d").putImageData(img, 0, 0);
+  $("tag").textContent = "BEST SINGLE FRAME";
+};
+const showStack = () => {
+  if (!state.rendered) return;
+  $("view").getContext("2d").putImageData(state.rendered, 0, 0);
+  $("tag").textContent = `${state.sample ? "SAMPLE · " : ""}STACK OF ${$("sUsed").textContent}`;
+};
+cmp.addEventListener("pointerdown", showRef);
+for (const ev of ["pointerup", "pointerleave", "pointercancel"]) cmp.addEventListener(ev, showStack);
+cmp.addEventListener("keydown", (e) => { if (e.key === " " || e.key === "Enter") showRef(e); });
+cmp.addEventListener("keyup", showStack);
+cmp.addEventListener("contextmenu", (e) => e.preventDefault());
+
+let outBlob = null, outUrl = null;
+$("save").addEventListener("click", () => {
+  $("view").toBlob((blob) => {
+    if (!blob) return;
+    outBlob = blob;
+    if (outUrl) URL.revokeObjectURL(outUrl);
+    outUrl = URL.createObjectURL(blob);
+    $("outImg").src = outUrl;
+    const file = new File([blob], fileName(), { type: "image/png" });
+    let canShare = false;
+    try { canShare = !!(navigator.canShare && navigator.canShare({ files: [file] })); } catch (e) { /* not allowed */ }
+    $("share").hidden = !canShare;
+    $("modal").hidden = false;
+  }, "image/png");
+});
+function fileName() { const d = new Date(); return `moon-stack-${d.toISOString().slice(0, 10)}.png`; }
+$("share").addEventListener("click", async () => {
+  try { await navigator.share({ files: [new File([outBlob], fileName(), { type: "image/png" })] }); } catch (e) { /* cancelled */ }
+});
+$("download").addEventListener("click", () => {
+  const a = document.createElement("a");
+  a.href = outUrl; a.download = fileName();
+  document.body.appendChild(a); a.click(); a.remove();
+});
+$("closeModal").addEventListener("click", () => { $("modal").hidden = true; });
+
+/* ---------- synthetic sample so the page opens with something real to look at ---------- */
+
+function rng(seed) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); }
+function makeMoonTexture(R) {
+  const S = 2 * R, c = makeCanvas(S, S), g = c.getContext("2d");
+  const rand = rng(7);
+  // value-noise maria
+  const G = 12, grid = new Float32Array((G + 1) * (G + 1)).map(rand);
+  const vn = (x, y) => {
+    const gx = x * G, gy = y * G, ix = Math.min(G - 1, Math.floor(gx)), iy = Math.min(G - 1, Math.floor(gy)), fx = gx - ix, fy = gy - iy;
+    const sm = (t) => t * t * (3 - 2 * t), a = grid[iy * (G + 1) + ix], b = grid[iy * (G + 1) + ix + 1], cc = grid[(iy + 1) * (G + 1) + ix], d = grid[(iy + 1) * (G + 1) + ix + 1];
+    return (a + (b - a) * sm(fx)) * (1 - sm(fy)) + (cc + (d - cc) * sm(fx)) * sm(fy);
+  };
+  const img = g.createImageData(S, S), D = img.data;
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const nx = (x - R) / R, ny = (y - R) / R, r2 = nx * nx + ny * ny, j = (y * S + x) * 4;
+    if (r2 > 1) continue;
+    const m = vn(x / S, y / S) * 0.7 + vn((x * 3) / S % 1, (y * 3) / S % 1) * 0.3;
+    const albedo = m > 0.55 ? 0.55 : 0.85 + (rand() - 0.5) * 0.05;
+    const v = albedo * (0.55 + 0.45 * Math.sqrt(1 - r2)) * 235;
+    D[j] = v * 1.02; D[j + 1] = v; D[j + 2] = v * 0.95; D[j + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  g.globalCompositeOperation = "source-atop";
+  for (let i = 0; i < 260; i++) {
+    const a = rand() * Math.PI * 2, d = Math.sqrt(rand()) * R * 0.95, cr = (rand() ** 3) * R * 0.12 + 2;
+    const x = R + Math.cos(a) * d, y = R + Math.sin(a) * d;
+    g.fillStyle = "rgba(0,0,0,0.28)"; g.beginPath(); g.arc(x + cr * 0.15, y + cr * 0.15, cr, 0, 7); g.fill();
+    g.strokeStyle = "rgba(255,255,255,0.35)"; g.lineWidth = Math.max(1, cr * 0.18); g.beginPath(); g.arc(x - cr * 0.1, y - cr * 0.1, cr, Math.PI * 0.9, Math.PI * 1.9); g.stroke();
+  }
+  // gibbous terminator
+  const sh = g.getImageData(0, 0, S, S), E = sh.data;
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const nx = (x - R) / R, ny = (y - R) / R, j = (y * S + x) * 4;
+    if (nx * nx + ny * ny > 1) continue;
+    const edge = -0.55 * Math.sqrt(Math.max(0, 1 - ny * ny));
+    const k = clamp((nx - edge) * 9 + 0.5, 0, 1);
+    E[j] *= k; E[j + 1] *= k; E[j + 2] *= k;
+  }
+  g.putImageData(sh, 0, 0);
+  return c;
+}
+function sampleSources(n) {
+  const tex = makeMoonTexture(210), W = 900, H = 680, rand = rng(42);
+  const frames = [];
+  for (let i = 0; i < n; i++) frames.push({ jx: (rand() - 0.5) * 120, jy: (rand() - 0.5) * 90, blur: rand() < 0.35 ? 1.6 + rand() * 2 : rand() * 0.6, seed: 1000 + i, ex: 0.9 + rand() * 0.2 });
+  return frames.map((p, i) => ({
+    label: `sample frame ${i + 1}`,
+    async get() {
+      const c = makeCanvas(W, H), g = c.getContext("2d");
+      g.fillStyle = "#050608"; g.fillRect(0, 0, W, H);
+      const S = tex.width, s = Math.max(16, Math.round(S / (1 + p.blur)));
+      const small = makeCanvas(s, s), sg = small.getContext("2d");
+      sg.imageSmoothingQuality = "high"; sg.drawImage(tex, 0, 0, s, s);
+      g.imageSmoothingQuality = "high";
+      g.drawImage(small, (W - S) / 2 + p.jx, (H - S) / 2 + p.jy, S, S);
+      const im = g.getImageData(0, 0, W, H), D = im.data, r = rng(p.seed);
+      for (let j = 0; j < D.length; j += 4) {
+        const nz = (r() + r() + r() - 1.5) * 34;
+        D[j] = D[j] * p.ex + nz; D[j + 1] = D[j + 1] * p.ex + nz; D[j + 2] = D[j + 2] * p.ex + nz;
+      }
+      g.putImageData(im, 0, 0);
+      return { img: c, w: W, h: H, release() {} };
+    },
+  }));
+}
+
+setTimeout(() => run(sampleSources(16), true), 50);
+</script>
