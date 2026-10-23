@@ -3,6 +3,7 @@ import numpy as np, json, os, subprocess
 from PIL import Image, ImageFilter
 rng = np.random.default_rng(3)
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gen')
+os.makedirs(OUT, exist_ok=True)
 
 # ---- ground-truth moon, 1024 px ----
 S = 1024; R = S/2
@@ -30,22 +31,35 @@ rgb = np.stack([moon*1.03, moon, moon*0.94], -1)
 Image.fromarray((np.clip(rgb, 0, 1)*255).astype(np.uint8)).save(f'{OUT}/truth.png')
 moonA = disk.astype(np.float32)
 
+TRUTH_IMG = Image.fromarray((np.clip(rgb, 0, 1)*255).astype(np.uint8))
+ALPHA_IMG = Image.fromarray((moonA*255).astype(np.uint8))
+SS = 4  # sensor model: render at 4x, shift by a sub-pixel amount, then box-average 4x4 into one pixel
+
 def frame(W, H, diam, cx, cy, blur, gain, noise, light=False, cloud=False):
     sky = np.linspace(14, 34, H, dtype=np.float32)[:, None, None]*np.ones((1, W, 3), np.float32)*[0.8, 0.85, 1.0]
     img = sky.copy()
     if not cloud:
-        m = Image.fromarray((np.clip(rgb, 0, 1)*255).astype(np.uint8)).resize((diam, diam), Image.LANCZOS)
-        if blur > 0: m = m.filter(ImageFilter.GaussianBlur(blur))
-        a = np.asarray(Image.fromarray((moonA*255).astype(np.uint8)).resize((diam, diam), Image.LANCZOS).filter(ImageFilter.GaussianBlur(max(blur, 0.5))))/255.0
-        mm = np.asarray(m).astype(np.float32)*gain
-        x0, y0 = int(round(cx-diam/2)), int(round(cy-diam/2))
-        sub = img[y0:y0+diam, x0:x0+diam]
-        img[y0:y0+diam, x0:x0+diam] = sub*(1-a[..., None]) + np.maximum(sub, mm)*a[..., None]
-        cx, cy = x0+diam/2, y0+diam/2
+        pad = int(6*blur) + 4
+        D4 = diam*SS
+        x0, y0 = int(np.floor(cx - diam/2)) - pad, int(np.floor(cy - diam/2)) - pad
+        box = diam + 2*pad + 1
+        # sub-pixel offset of the Moon centre inside the box, in hi-res pixels
+        ox, oy = int(round((cx - diam/2 - x0)*SS)), int(round((cy - diam/2 - y0)*SS))
+        hi = Image.new('RGB', (box*SS, box*SS)); ha = Image.new('L', (box*SS, box*SS))
+        hi.paste(TRUTH_IMG.resize((D4, D4), Image.LANCZOS), (ox, oy))
+        ha.paste(ALPHA_IMG.resize((D4, D4), Image.LANCZOS), (ox, oy))
+        if blur > 0:
+            hi = hi.filter(ImageFilter.GaussianBlur(blur*SS)); ha = ha.filter(ImageFilter.GaussianBlur(blur*SS))
+        m = np.asarray(hi.reduce(SS)).astype(np.float32)*gain
+        a = np.asarray(ha.reduce(SS)).astype(np.float32)[..., None]/255.0
+        sub = img[y0:y0+box, x0:x0+box]
+        img[y0:y0+box, x0:x0+box] = sub*(1-a) + np.maximum(sub, m)*a
+        cx, cy = x0 + ox/SS + diam/2, y0 + oy/SS + diam/2
     if light:
         d = np.hypot(*np.mgrid[0:H, 0:W][::-1].astype(np.float32) - np.array([W*0.9, H*0.88])[:, None, None])
         img += (255*np.exp(-(d/18)**2))[..., None]
-    img += rng.normal(0, noise, img.shape).astype(np.float32)
+    # shot noise grows with brightness, plus read noise
+    img += rng.normal(0, 1, img.shape).astype(np.float32)*np.sqrt(noise**2 + 0.15*np.maximum(img, 0))
     return Image.fromarray(np.clip(img, 0, 255).astype(np.uint8)), (cx, cy)
 
 truth = {}
@@ -63,6 +77,17 @@ for i in range(24):
         im.save(f'{OUT}/photos/{name}', quality=88)
     truth[name] = {'cx': c[0], 'cy': c[1], 'blur': blur, 'cloud': i in (7, 19)}
 json.dump(truth, open(f'{OUT}/truth.json', 'w'))
+
+# ---- phone at 5x zoom: tiny, undersampled Moon (~130 px across), sharp lens ----
+truth_s = {}
+os.makedirs(f'{OUT}/photos_small', exist_ok=True)
+for i in range(24):
+    cx = W/2 + rng.uniform(-300, 300); cy = H/2 + rng.uniform(-250, 250)
+    im, c = frame(W, H, 130, cx, cy, rng.uniform(0.25, 0.8), rng.uniform(0.9, 1.05), 5)
+    name = f'IMG_{5100+i}.jpg'
+    im.save(f'{OUT}/photos_small/{name}', quality=90)
+    truth_s[name] = {'cx': c[0], 'cy': c[1], 'diam': 130}
+json.dump(truth_s, open(f'{OUT}/truth_small.json', 'w'))
 
 # ---- video: 1920x1080, moon 320 px, smooth hand-shake ----
 os.makedirs(f'{OUT}/vframes', exist_ok=True)

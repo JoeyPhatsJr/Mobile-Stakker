@@ -194,15 +194,42 @@
       </section>
 
       <section class="panel">
-        <h2>Process</h2>
+        <h2>Enhance</h2>
         <div class="grid2">
           <div class="field">
-            <label for="sharpFine">Fine detail <output id="sharpFineV"></output></label>
-            <input id="sharpFine" type="range" min="0" max="4" step="0.1" value="1.2">
+            <label for="upscale">Upscale</label>
+            <select id="upscale">
+              <option value="ai" selected>2× AI</option>
+              <option value="drizzle">2× frame shifts</option>
+              <option value="off">Off</option>
+            </select>
           </div>
           <div class="field">
-            <label for="sharpCoarse">Craters &amp; maria <output id="sharpCoarseV"></output></label>
-            <input id="sharpCoarse" type="range" min="0" max="3" step="0.1" value="0.6">
+            <span class="lbl">Blur measured at the limb <output id="psf">–</output></span>
+            <span class="sub" id="upNote" style="font-size: 0.75rem;"></span>
+          </div>
+          <div class="field">
+            <label for="denoise">Denoise <output id="denoiseV"></output></label>
+            <input id="denoise" type="range" min="0" max="3" step="0.1" value="2.5">
+          </div>
+          <div class="field">
+            <label for="deblur">Deblur <output id="deblurV"></output></label>
+            <input id="deblur" type="range" min="0" max="1" step="0.05" value="0.65">
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Process</h2>
+        <p class="sub" style="font-size: 0.75rem; margin: 0;">Extra sharpening works on top of Deblur and can add halos around the edge. Start at 0.</p>
+        <div class="grid2">
+          <div class="field">
+            <label for="sharpFine">Extra sharpening <output id="sharpFineV"></output></label>
+            <input id="sharpFine" type="range" min="0" max="2" step="0.1" value="0">
+          </div>
+          <div class="field">
+            <label for="sharpCoarse">Extra crater contrast <output id="sharpCoarseV"></output></label>
+            <input id="sharpCoarse" type="range" min="0" max="1.5" step="0.1" value="0">
           </div>
           <div class="field">
             <label for="gamma">Midtones (gamma) <output id="gammaV"></output></label>
@@ -616,10 +643,10 @@ async function run(sources, isSample) {
     if (skipped) $("sFrames").textContent = `${frames.length}/${total}`;
     setStatus("Stacking…", 0.97);
     await tick();
-    restack();
     const what = isSample ? "Sample: 16 synthetic frames. Choose your own photos to replace it."
       : `Done. ${frames.length} frames aligned${skipped ? `, ${skipped} skipped (${unreadable ? `${unreadable} unreadable, ` : ""}no clear Moon in the rest)` : ""}.`;
-    setStatus(what, 1);
+    state.doneMsg = what;
+    restack();
   } catch (e) {
     setStatus(e.message || String(e), 0);
   } finally {
@@ -688,16 +715,25 @@ function restack() {
       sum[o] = acc[o] / cnt[p]; sum[o + 1] = acc[o + 1] / cnt[p]; sum[o + 2] = acc[o + 2] / cnt[p];
     }
   }
+  if (!($("method").value === "sigma" && k >= 4)) {
+    for (let p = 0; p < n; p++) { const c = cov[p] || 1, m = lsum[p] / c; lsq[p] = k >= 4 ? 2.2 * Math.sqrt(Math.max(0, lsq[p] / c - m * m)) + 1.5 : 0; lsum[p] = m; }
+  }
   state.stack = sum;
+  state.meanL = lsum; state.thrL = k >= 4 ? lsq : null;
+  state.sel = sel;
   $("sUsed").textContent = k;
   drawStrip(new Set(sel));
-  render();
+  rebase();
 }
 
 /* ---------- post-processing ---------- */
 
+// Blurs. Exact separable Gaussian for small sigma, three box passes (Kovesi) for large.
+const scratch = new Map();
+function buf32(key, n) { let b = scratch.get(key); if (!b || b.length !== n) { b = new Float32Array(n); scratch.set(key, b); } return b; }
+
 function boxBlur(src, dst, w, h, r) {
-  const tmp = new Float32Array(w * h), d = 2 * r + 1;
+  const tmp = buf32("box", w * h), d = 2 * r + 1;
   for (let y = 0; y < h; y++) {
     const o = y * w; let s = 0;
     for (let x = -r; x <= r; x++) s += src[o + clamp(x, 0, w - 1)];
@@ -720,18 +756,462 @@ function gauss(src, w, h, r) {
   boxBlur(src, a, w, h, r); boxBlur(a, b, w, h, r); boxBlur(b, a, w, h, r);
   return a;
 }
+function gaussBlur(src, dst, w, h, sigma) {
+  if (sigma >= 2.5) {
+    const wi = Math.sqrt(4 * sigma * sigma + 1);
+    let wl = Math.floor(wi); if (wl % 2 === 0) wl--;
+    const m = Math.round((12 * sigma * sigma - 3 * wl * wl - 12 * wl - 9) / (-4 * wl - 4));
+    const rs = [0, 1, 2].map((i) => ((i < m ? wl : wl + 2) - 1) / 2);
+    const t = buf32("gb", w * h);
+    boxBlur(src, t, w, h, rs[0]); boxBlur(t, dst, w, h, rs[1]); boxBlur(dst, t, w, h, rs[2]);
+    dst.set(t);
+    return;
+  }
+  const R = Math.max(1, Math.ceil(3 * sigma)), k = new Float32Array(2 * R + 1);
+  let ks = 0;
+  for (let i = -R; i <= R; i++) ks += k[i + R] = Math.exp((-i * i) / (2 * sigma * sigma));
+  for (let i = 0; i < k.length; i++) k[i] /= ks;
+  const t = buf32("gb", w * h);
+  for (let y = 0; y < h; y++) {
+    const o = y * w;
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      if (x >= R && x < w - R) for (let i = -R; i <= R; i++) s += src[o + x + i] * k[i + R];
+      else for (let i = -R; i <= R; i++) s += src[o + clamp(x + i, 0, w - 1)] * k[i + R];
+      t[o + x] = s;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    const inner = y >= R && y < h - R;
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      if (inner) for (let i = -R; i <= R; i++) s += t[(y + i) * w + x] * k[i + R];
+      else for (let i = -R; i <= R; i++) s += t[clamp(y + i, 0, h - 1) * w + x] * k[i + R];
+      dst[y * w + x] = s;
+    }
+  }
+}
 
-function render() {
-  const S = state.stack; if (!S) return;
-  const O = state.OUT, n = O * O;
+function lumRGB(S, n) {
   const L = new Float32Array(n);
   for (let p = 0, o = 0; p < n; p++, o += 3) L[p] = 0.299 * S[o] + 0.587 * S[o + 1] + 0.114 * S[o + 2];
+  return L;
+}
+function bil(A, W, x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  if (ix < 0 || iy < 0 || ix >= W - 1 || iy >= W - 1) return NaN;
+  const ax = x - ix, ay = y - iy, p = iy * W + ix;
+  return (A[p] * (1 - ax) + A[p + 1] * ax) * (1 - ay) + (A[p + W] * (1 - ax) + A[p + W + 1] * ax) * ay;
+}
+// 2x bilinear upsample (pixel-centre aligned), any channel count
+function up2(A, O, ch) {
+  const W = 2 * O, out = new Float32Array(W * W * ch);
+  for (let Y = 0; Y < W; Y++) {
+    const y = clamp((Y + 0.5) / 2 - 0.5, 0, O - 1), iy = Math.min(O - 2, Math.floor(y)), ay = y - iy;
+    for (let X = 0; X < W; X++) {
+      const x = clamp((X + 0.5) / 2 - 0.5, 0, O - 1), ix = Math.min(O - 2, Math.floor(x)), ax = x - ix;
+      const p = (iy * O + ix) * ch, q = p + O * ch, o = (Y * W + X) * ch;
+      for (let c = 0; c < ch; c++) {
+        out[o + c] = (A[p + c] * (1 - ax) + A[p + ch + c] * ax) * (1 - ay) + (A[q + c] * (1 - ax) + A[q + ch + c] * ax) * ay;
+      }
+    }
+  }
+  return out;
+}
+// 2x2 box average (what a sensor pixel twice as big would have recorded)
+function down2(A, W, ch) {
+  const O = W >> 1, out = new Float32Array(O * O * ch);
+  for (let y = 0; y < O; y++) for (let x = 0; x < O; x++) {
+    const p = (2 * y * W + 2 * x) * ch, q = p + W * ch, o = (y * O + x) * ch;
+    for (let c = 0; c < ch; c++) out[o + c] = 0.25 * (A[p + c] + A[p + ch + c] + A[q + c] + A[q + ch + c]);
+  }
+  return out;
+}
+
+/* ---------- enhancement ---------- */
+
+// Multi-frame super-resolution: every frame lands at a slightly different sub-pixel offset,
+// so dropping each pixel onto a 2x grid at its true position recovers real detail.
+function drizzle(sel, O) {
+  const W = 2 * O, n2 = W * W, acc = new Float32Array(n2 * 3), wsum = new Float32Array(n2);
+  const mean = state.meanL, thr = state.thrL;
+  for (const i of sel) {
+    const f = state.frames[i], src = f.data, g = f.gain;
+    for (let y = 0; y < O; y++) {
+      const V = 2 * (y + 0.5 - f.dy) - 0.5, iy = Math.floor(V), ay = V - iy;
+      if (iy < 0 || iy >= W - 1) continue;
+      const ry = clamp(Math.round(y - f.dy), 0, O - 1);
+      for (let x = 0; x < O; x++) {
+        const U = 2 * (x + 0.5 - f.dx) - 0.5, ix = Math.floor(U), ax = U - ix;
+        if (ix < 0 || ix >= W - 1) continue;
+        const p = (y * O + x) * 4, r = src[p] * g, gg = src[p + 1] * g, b = src[p + 2] * g;
+        if (thr) {
+          const q = ry * O + clamp(Math.round(x - f.dx), 0, O - 1);
+          if (Math.abs(0.299 * r + 0.587 * gg + 0.114 * b - mean[q]) > thr[q]) continue;
+        }
+        const o = iy * W + ix, ws = [(1 - ax) * (1 - ay), ax * (1 - ay), (1 - ax) * ay, ax * ay], os = [o, o + 1, o + W, o + W + 1];
+        for (let k = 0; k < 4; k++) {
+          const w = ws[k], t = os[k];
+          wsum[t] += w; acc[t * 3] += r * w; acc[t * 3 + 1] += gg * w; acc[t * 3 + 2] += b * w;
+        }
+      }
+    }
+  }
+  // where few drops landed, lean on the plain stack instead of leaving holes
+  const prior = up2(state.stack, O, 3), k0 = 0.2;
+  for (let p = 0; p < n2; p++) {
+    const d = wsum[p] + k0;
+    for (let c = 0; c < 3; c++) acc[p * 3 + c] = (acc[p * 3 + c] + k0 * prior[p * 3 + c]) / d;
+  }
+  return acc;
+}
+
+// Find the Moon's limb, then measure how blurred it is. The limb is a perfectly sharp edge in
+// reality, so its profile in the stack is the blur (PSF) of everything: optics, air, shake, stacking.
+function fitLimb(L, W) {
+  const n = W * W, smp = [];
+  for (let p = 0; p < n; p += 7) smp.push(L[p]);
+  smp.sort((a, b) => a - b);
+  const sky = smp[Math.floor(smp.length * 0.2)], hi = smp[Math.floor(smp.length * 0.995)];
+  if (hi - sky < 10) return null;
+  const thr = sky + 0.3 * (hi - sky);
+  let x0 = W, x1 = -1, y0 = W, y1 = -1;
+  for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) if (L[y * W + x] > thr) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  if (x1 < 0) return null;
+  const cx0 = (x0 + x1 + 1) / 2, cy0 = (y0 + y1 + 1) / 2, r0 = Math.max(x1 - x0, y1 - y0) / 2;
+  const pts = [];
+  for (let a = 0; a < 720; a++) {
+    const t = (a * Math.PI) / 360, c = Math.cos(t), s = Math.sin(t);
+    let prev = NaN;
+    for (let r = r0 * 1.3; r > r0 * 0.2; r -= 0.5) {
+      const v = bil(L, W, cx0 + r * c, cy0 + r * s);
+      if (v > thr) {
+        const f = prev === prev ? (thr - prev) / (v - prev) : 0;
+        pts.push([cx0 + (r + 0.5 - 0.5 * f) * c, cy0 + (r + 0.5 - 0.5 * f) * s]);
+        break;
+      }
+      prev = v;
+    }
+  }
+  if (pts.length < 60) return null;
+  const circle3 = (a, b, c) => {
+    const d = 2 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]));
+    if (Math.abs(d) < 1e-6) return null;
+    const A = a[0] * a[0] + a[1] * a[1], B = b[0] * b[0] + b[1] * b[1], C = c[0] * c[0] + c[1] * c[1];
+    const x = (A * (b[1] - c[1]) + B * (c[1] - a[1]) + C * (a[1] - b[1])) / d, y = (A * (c[0] - b[0]) + B * (a[0] - c[0]) + C * (b[0] - a[0])) / d;
+    return [x, y, Math.hypot(a[0] - x, a[1] - y)];
+  };
+  const fitLSQ = (P) => { // Kasa algebraic circle fit
+    let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sz = 0, sxz = 0, syz = 0; const m = P.length;
+    for (const [x, y] of P) { const z = x * x + y * y; sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; sz += z; sxz += x * z; syz += y * z; }
+    const M = [[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, m]], v = [sxz, syz, sz];
+    const det = (A) => A[0][0] * (A[1][1] * A[2][2] - A[1][2] * A[2][1]) - A[0][1] * (A[1][0] * A[2][2] - A[1][2] * A[2][0]) + A[0][2] * (A[1][0] * A[2][1] - A[1][1] * A[2][0]);
+    const D = det(M); if (Math.abs(D) < 1e-9) return null;
+    const sol = [0, 1, 2].map((k) => det(M.map((row, i) => row.map((e, j) => (j === k ? v[i] : e)))) / D);
+    const cx = sol[0] / 2, cy = sol[1] / 2;
+    return [cx, cy, Math.sqrt(sol[2] + cx * cx + cy * cy)];
+  };
+  const rnd = rng(99);
+  let best = null, bestN = 0;
+  const tol = Math.max(1, 0.006 * r0);
+  for (let it = 0; it < 400; it++) {
+    const c = circle3(pts[Math.floor(rnd() * pts.length)], pts[Math.floor(rnd() * pts.length)], pts[Math.floor(rnd() * pts.length)]);
+    if (!c || c[2] < r0 * 0.5 || c[2] > r0 * 1.5) continue;
+    let k = 0; for (const p of pts) if (Math.abs(Math.hypot(p[0] - c[0], p[1] - c[1]) - c[2]) < tol) k++;
+    if (k > bestN) { bestN = k; best = c; }
+  }
+  if (!best || bestN < 60) return null;
+  let inl = pts;
+  for (let r = 0; r < 3; r++) {
+    inl = pts.filter((p) => Math.abs(Math.hypot(p[0] - best[0], p[1] - best[1]) - best[2]) < tol * 1.5);
+    const c = fitLSQ(inl); if (!c) break; best = c;
+  }
+  const [cx, cy, R] = best;
+  // average edge profile across the lit limb
+  const win = Math.max(10, Math.round(0.06 * R)), step = 0.25, K = Math.round((2 * win) / step) + 1;
+  const prof = new Float64Array(K), cnt = new Float64Array(K);
+  for (const [px, py] of inl) {
+    const t = Math.atan2(py - cy, px - cx), c = Math.cos(t), s = Math.sin(t);
+    for (let k = 0; k < K; k++) {
+      const r = R - win + k * step, v = bil(L, W, cx + r * c, cy + r * s);
+      if (v === v) { prof[k] += v; cnt[k]++; }
+    }
+  }
+  for (let k = 0; k < K; k++) prof[k] /= cnt[k] || 1;
+  const lsf = new Float64Array(K);
+  for (let k = 1; k < K - 1; k++) lsf[k] = Math.max(0, -(prof[k + 1] - prof[k - 1]) / (2 * step));
+  // the edge sits at the peak of the line-spread; its width is measured on the sky side only,
+  // because the Moon side also carries real surface detail and limb darkening
+  const sm = new Float64Array(K);
+  for (let k = 2; k < K - 2; k++) sm[k] = (lsf[k - 2] + 2 * lsf[k - 1] + 3 * lsf[k] + 2 * lsf[k + 1] + lsf[k + 2]) / 9;
+  let pk = 2; for (let k = 2; k < K - 2; k++) if (sm[k] > sm[pk]) pk = k;
+  const den = sm[pk - 1] - 2 * sm[pk] + sm[pk + 1];
+  const mu = (pk + (den < 0 ? clamp((sm[pk - 1] - sm[pk + 1]) / (2 * den), -0.5, 0.5) : 0)) * step;
+  let sig = win / 4;
+  for (let it = 0; it < 4; it++) {
+    let s0 = 0, s2 = 0;
+    for (let k = 0; k < K; k++) { const d = k * step - mu; if (d < 0 || d > 4 * sig) continue; s0 += lsf[k]; s2 += lsf[k] * d * d; }
+    if (!s0) return null;
+    sig = Math.sqrt(s2 / s0);
+  }
+  const angles = inl.map(([px, py]) => Math.atan2(py - cy, px - cx));
+  return { cx, cy, R: R - win + mu, sigma: clamp(sig, 0.3, win / 3), sky, limbPts: inl.length, angles };
+}
+
+function skyStats(L, W, limb, Lb) {
+  const v = [];
+  for (let p = 0; p < W * W; p += 7) { const x = p % W, y = (p - x) / W; if ((x - limb.cx) ** 2 + (y - limb.cy) ** 2 > (limb.R + 6 * limb.sigma + 6) ** 2 && Lb[p] > 0.5) v.push(L[p]); }
+  if (v.length < 50) return { m: limb.sky, sd: 1 };
+  const m = median(v), d = v.map((x) => Math.abs(x - m));
+  return { m, sd: median(d) / 0.6745 };
+}
+// mean level just outside the lit limb, relative to the sky further out (negative = dark ring)
+function limbHalo(L, W, limb) {
+  const sky = skyStats(L, W, limb, L).m;
+  let s = 0, n = 0;
+  for (const t of limb.angles) {
+    const c = Math.cos(t), si = Math.sin(t);
+    for (let r = limb.R + 2 * limb.sigma + 1; r < limb.R + 5 * limb.sigma + 4; r += 0.5) {
+      const v = bil(L, W, limb.cx + r * c, limb.cy + r * si);
+      if (v === v) { s += v; n++; }
+    }
+  }
+  return n ? s / n - sky : 0;
+}
+function median(arr) { const a = Float32Array.from(arr).sort(); return a.length ? a[a.length >> 1] : 0; }
+
+// Shape of the noise: per-frame variance grows with brightness (photon noise). Fit var = a + b*(I - sky)
+// from frame-to-frame scatter, robustly, so denoising can be stronger on the bright Moon than in the sky.
+function noiseShape(sky) {
+  const mean = state.meanL, thr = state.thrL;
+  if (!thr) return 0;
+  const bins = Array.from({ length: 16 }, () => []), top = 255;
+  for (let p = 0; p < mean.length; p += 3) {
+    const sd = (thr[p] - 1.5) / 2.2, b = Math.floor((mean[p] / top) * 16);
+    if (b >= 0 && b < 16) bins[b].push(sd * sd);
+  }
+  const xs = [], ys = [];
+  bins.forEach((v, i) => { if (v.length > 50) { xs.push(((i + 0.5) / 16) * top - sky); ys.push(median(v) * 0.7); } });
+  if (xs.length < 3) return 0;
+  const mx = xs.reduce((a, b) => a + b) / xs.length, my = ys.reduce((a, b) => a + b) / ys.length;
+  let sxy = 0, sxx = 0; xs.forEach((x, i) => { sxy += (x - mx) * (ys[i] - my); sxx += (x - mx) * (x - mx); });
+  const b = sxy / sxx, a = Math.max(1e-3, my - b * mx);
+  return Math.max(0, b / a);
+}
+
+// Wavelet (starlet / a-trous) denoise. Noise per scale is measured in the empty sky around the Moon,
+// scaled up for brighter pixels by the measured noise shape, and only coefficients that look like
+// noise are shrunk (non-negative garrote), so real crater edges keep their contrast.
+function starletDenoise(L, W, strength, limb, shape) {
+  if (strength <= 0) return L.slice();
+  const n = W * W, J = 4, h = [1 / 16, 4 / 16, 6 / 16, 4 / 16, 1 / 16];
+  const conv = (src, dst, step) => {
+    const t = buf32("st", n);
+    for (let y = 0; y < W; y++) { const o = y * W; for (let x = 0; x < W; x++) { let s = 0; for (let k = -2; k <= 2; k++) s += h[k + 2] * src[o + clamp(x + k * step, 0, W - 1)]; t[o + x] = s; } }
+    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) { let s = 0; for (let k = -2; k <= 2; k++) s += h[k + 2] * t[clamp(y + k * step, 0, W - 1) * W + x]; dst[y * W + x] = s; }
+  };
+  // brightness used to scale the threshold (smooth, so noise doesn't steer it)
+  const base = new Float32Array(n); gaussBlur(L, base, W, W, 4);
+  // sky mask: well outside the limb, and not crop padding
+  const sky = [];
+  if (limb) {
+    const r2 = (limb.R + 4 * limb.sigma + 4) ** 2;
+    for (let y = 2; y < W - 2; y += 2) for (let x = 2; x < W - 2; x += 2) {
+      const p = y * W + x;
+      if ((x - limb.cx) ** 2 + (y - limb.cy) ** 2 > r2 && L[p] > 0.5) sky.push(p);
+    }
+  }
+  const useSky = sky.length > 800, skyLevel = limb ? limb.sky : 0;
+  const out = new Float32Array(n), w = new Float32Array(n);
+  let a = L.slice(), b = new Float32Array(n);
+  for (let j = 0; j < J; j++) {
+    conv(a, b, 1 << j);
+    for (let p = 0; p < n; p++) w[p] = a[p] - b[p];
+    let sig;
+    if (useSky) { const v = new Float32Array(sky.length); sky.forEach((p, i) => (v[i] = Math.abs(w[p]))); sig = median(v) / 0.6745; }
+    else { const v = []; for (let p = 0; p < n; p += 5) v.push(Math.abs(w[p])); sig = median(v) / 0.6745; }
+    const k = strength * (j === 0 ? 1 : j === 1 ? 0.85 : 0.6);
+    for (let p = 0; p < n; p++) {
+      const t = k * sig * Math.sqrt(1 + shape * Math.max(0, base[p] - skyLevel)), v = w[p];
+      out[p] += Math.abs(v) <= t ? 0 : v * (1 - (t * t) / (v * v));
+    }
+    const t = a; a = b; b = t;
+  }
+  for (let p = 0; p < n; p++) out[p] += a[p];
+  return out;
+}
+
+// Damped Richardson-Lucy deconvolution (White 1994): undoes the measured blur, but each pixel stops
+// changing once the model already matches its data to within the noise there. Smooth areas and the
+// sky stay put (no grain, no hatching); real edges, which don't fit yet, keep getting sharper.
+function deconvolve(L, W, sigma, iters, damp, pedestal, noiseAt) {
+  const n = W * W;
+  let mx = 0; for (let p = 0; p < n; p++) if (L[p] > mx) mx = L[p];
+  const sc = Math.max(1, mx - pedestal), obs = new Float32Array(n), u = new Float32Array(n), tn = new Float32Array(n);
+  for (let p = 0; p < n; p++) {
+    u[p] = obs[p] = Math.max(0, L[p] - pedestal) / sc + 1e-4;
+    const s = (damp * noiseAt(p)) / sc; tn[p] = s > 0 ? 1 / (s * s) : 0;
+  }
+  const est = buf32("rl1", n), cor = buf32("rl2", n);
+  for (let it = 0; it < iters; it++) {
+    gaussBlur(u, est, W, W, sigma);
+    for (let p = 0; p < n; p++) {
+      const e = Math.max(est[p], 1e-6), d = obs[p] - e;
+      // White's damping: full RL step only where the misfit is bigger than the noise
+      const k = tn[p] ? Math.min(1, d * d * tn[p]) : 1;
+      est[p] = 1 + k * (obs[p] / e - 1);
+    }
+    gaussBlur(est, cor, W, W, sigma);
+    for (let p = 0; p < n; p++) u[p] *= cor[p];
+  }
+  const out = new Float32Array(n);
+  for (let p = 0; p < n; p++) out[p] = (u[p] - 1e-4) * sc + pedestal;
+  return out;
+}
+
+// AI 2x upscale (ESRGAN-slim, an RDN trained on DIV2K for accuracy), run in tiles so it fits in phone memory,
+// then held to the data: the result is repeatedly corrected so that shrinking it back to 1x reproduces the
+// stack exactly. Anything the network makes up that the photos contradict gets removed.
+const AI = { tf: "https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js", model: "https://cdn.jsdelivr.net/npm/@upscalerjs/esrgan-slim@1.0.0/models/x2/model.json" };
+function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; s.onload = res; s.onerror = () => rej(new Error("Couldn't load the AI model. Check your connection.")); document.head.appendChild(s); }); }
+async function aiModel() {
+  if (state.aiModel) return state.aiModel;
+  if (state.aiFailed) throw state.aiFailed; // don't retry a failed download on every slider move
+  try {
+    if (!window.tf) await loadScript(AI.tf);
+    try { await tf.setBackend("webgl"); } catch (e) { /* falls back to cpu */ }
+    state.aiModel = await tf.loadLayersModel(AI.model);
+  } catch (e) { state.aiFailed = e; throw e; }
+  return state.aiModel;
+}
+async function aiUpscale(rgb, O, progress) {
+  const model = await aiModel(), W = 2 * O, out = new Float32Array(W * W * 3);
+  const T = 96, P = 8;
+  const tiles = [];
+  for (let ty = 0; ty < O; ty += T) for (let tx = 0; tx < O; tx += T) tiles.push([tx, ty]);
+  for (let t = 0; t < tiles.length; t++) {
+    const [tx, ty] = tiles[t];
+    const x0 = Math.max(0, tx - P), y0 = Math.max(0, ty - P), x1 = Math.min(O, tx + T + P), y1 = Math.min(O, ty + T + P);
+    const w = x1 - x0, h = y1 - y0, inp = new Float32Array(w * h * 3);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let c = 0; c < 3; c++) inp[(y * w + x) * 3 + c] = clamp(rgb[((y0 + y) * O + x0 + x) * 3 + c], 0, 255);
+    const res = tf.tidy(() => model.predict(tf.tensor4d(inp, [1, h, w, 3])));
+    const data = await res.data(); res.dispose();
+    const ox = 2 * (tx - x0), oy = 2 * (ty - y0), cw = 2 * Math.min(T, O - tx), ch = 2 * Math.min(T, O - ty);
+    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) for (let c = 0; c < 3; c++) {
+      out[((2 * ty + y) * W + 2 * tx + x) * 3 + c] = data[((oy + y) * 2 * w + ox + x) * 3 + c];
+    }
+    if (progress) progress((t + 1) / tiles.length);
+    await tick();
+  }
+  return out;
+}
+// Catmull-Rom 2x upsample, any channel count
+function cubic2(A, O, ch) {
+  const W = 2 * O, out = new Float32Array(W * W * ch);
+  const k = (x) => { x = Math.abs(x); return x < 1 ? 1.5 * x * x * x - 2.5 * x * x + 1 : x < 2 ? -0.5 * x * x * x + 2.5 * x * x - 4 * x + 2 : 0; };
+  const wx = [k(1.25), k(0.25), k(0.75), k(1.75)], wy = [k(1.75), k(0.75), k(0.25), k(1.25)];
+  for (let Y = 0; Y < W; Y++) {
+    const y = (Y + 0.5) / 2 - 0.5, iy = Math.floor(y), ky = Y % 2 ? wx : wy;
+    for (let X = 0; X < W; X++) {
+      const x = (X + 0.5) / 2 - 0.5, ix = Math.floor(x), kx = X % 2 ? wx : wy, o = (Y * W + X) * ch;
+      for (let c = 0; c < ch; c++) {
+        let s = 0;
+        for (let j = 0; j < 4; j++) { const row = clamp(iy - 1 + j, 0, O - 1) * O; for (let i = 0; i < 4; i++) s += kx[i] * ky[j] * A[(row + clamp(ix - 1 + i, 0, O - 1)) * ch + c]; }
+        out[o + c] = s;
+      }
+    }
+  }
+  return out;
+}
+function holdToData(hr, lr, O, rounds) {
+  for (let r = 0; r < rounds; r++) {
+    const d = down2(hr, 2 * O, 3);
+    for (let i = 0; i < d.length; i++) d[i] = lr[i] - d[i];
+    const u = up2(d, O, 3);
+    for (let i = 0; i < hr.length; i++) hr[i] += u[i];
+  }
+  return hr;
+}
+
+// base = what enhancement starts from: the plain stack, the drizzled 2x stack, or the AI 2x stack
+let baseToken = 0;
+async function rebase() {
+  state.enhancing = true;
+  const token = ++baseToken, O = state.OUT, mode = $("upscale").value;
+  let rgb = state.stack, W = O;
+  state.upLabel = "";
+  if (mode !== "off" && 2 * O > 2048) {
+    $("upNote").textContent = "Already at full size; upscaling is off for this stack.";
+  } else if (mode === "drizzle") {
+    setStatus("Combining frames on a 2× grid…");
+    await tick(); if (token !== baseToken) return;
+    rgb = drizzle(state.sel, O); W = 2 * O; state.upLabel = "2×";
+    $("upNote").textContent = "Detail from the tiny shifts between your frames.";
+  } else if (mode === "ai") {
+    let hr = null;
+    try {
+      hr = await aiUpscale(state.stack, O, (f) => setStatus(`AI upscaling… ${Math.round(f * 100)}%`, f));
+      $("upNote").textContent = "AI detail, corrected until it agrees with your photos.";
+      state.upLabel = "AI 2×";
+    } catch (e) {
+      hr = cubic2(state.stack, O, 3);
+      $("upNote").textContent = "AI model unavailable here, so the classic method was used (nearly as good).";
+      state.upLabel = "2×";
+    }
+    if (token !== baseToken) return;
+    rgb = holdToData(hr, state.stack, O, 6); W = 2 * O;
+  } else $("upNote").textContent = "";
+  if (token !== baseToken) return;
+  state.base = { rgb, W, Lbase: lumRGB(rgb, W * W) };
+  state.limb = fitLimb(state.base.Lbase, W);
+  state.shape = state.limb ? noiseShape(state.limb.sky) : 0;
+  enhance();
+}
+
+let enhToken = 0;
+async function enhance() {
+  state.enhancing = true;
+  const token = ++enhToken, B = state.base; if (!B) return;
+  const W = B.W, dn = +$("denoise").value, db = +$("deblur").value, limb = state.limb;
+  setStatus("Enhancing…");
+  await tick(); if (token !== enhToken) return;
+  let L = starletDenoise(B.Lbase, W, dn, limb, state.shape);
+  await tick(); if (token !== enhToken) return;
+  state.guard = "";
+  if (db > 0 && limb) {
+    const skyNoise = Math.max(0.5, skyStats(L, W, limb, B.Lbase).sd);
+    let iters = Math.round(db * 60), D = null;
+    // noise in the (denoised) image at each pixel: sky noise, growing with brightness (photon noise)
+    const sm = new Float32Array(W * W); gaussBlur(L, sm, W, W, 3);
+    const noiseAt = (p) => skyNoise * Math.sqrt(1 + state.shape * Math.max(0, sm[p] - limb.sky));
+    for (let attempt = 0; attempt < 3 && iters >= 3; attempt++) {
+      D = deconvolve(L, W, limb.sigma, iters, 1, limb.sky - 3 * skyNoise, noiseAt);
+      await tick(); if (token !== enhToken) return;
+      const halo = limbHalo(D, W, limb), after = skyStats(D, W, limb, B.Lbase);
+      // artifact guard: no dark ring outside the limb, no amplified grain in the sky
+      if (halo > -Math.max(1, skyNoise) && after.sd < skyNoise * 1.3) break;
+      state.guard = `Deblur eased to ${Math.round(iters / 2)} passes to avoid ${halo <= -Math.max(1, skyNoise) ? "a dark edge ring" : "grain"}.`;
+      iters = Math.round(iters / 2);
+    }
+    if (D) L = D;
+  }
+  if (token !== enhToken) return;
+  state.enh = { L, W };
+  state.enhancing = false;
+  $("psf").textContent = limb ? `${limb.sigma.toFixed(2)} px` : "edge not found";
+  setStatus((state.doneMsg || "") + (state.guard ? " " + state.guard : ""), 1);
+  render();
+}
+
+function render() {
+  const B = state.base, E = state.enh; if (!B || !E || E.W !== B.W) return;
+  const O = B.W, n = O * O, S = B.rgb, L0 = B.Lbase, L = E.L;
   const fine = +$("sharpFine").value, coarse = +$("sharpCoarse").value;
   const g1 = gauss(L, O, O, 1), g4 = gauss(L, O, O, 4);
   // levels from the lit part of the stack
   const hist = new Uint32Array(1024);
   let peak = 0;
-  for (let p = 0; p < n; p++) { const v = L[p]; if (v > peak) peak = v; hist[Math.min(1023, Math.floor(v * 4))]++; }
+  for (let p = 0; p < n; p++) { const v = L[p]; if (v > peak) peak = v; hist[clamp(Math.floor(v * 4), 0, 1023)]++; }
   let acc = 0, hi = peak; const lim = n * 0.9995;
   for (let i = 0; i < 1024; i++) { acc += hist[i]; if (acc >= lim) { hi = (i + 1) / 4; break; } }
   hi = Math.max(1, hi / +$("bright").value);
@@ -739,9 +1219,9 @@ function render() {
   const inv = 1 / Math.max(1e-3, hi - lo), gam = 1 / +$("gamma").value, sat = +$("sat").value;
   const img = new ImageData(O, O), D = img.data;
   for (let p = 0, o = 0, j = 0; p < n; p++, o += 3, j += 4) {
-    const l = L[p], delta = fine * (l - g1[p]) + coarse * (g1[p] - g4[p]) * 1.5;
+    const l = L[p], delta = fine * (l - g1[p]) + coarse * (g1[p] - g4[p]) * 1.5, l0 = L0[p];
     for (let c = 0; c < 3; c++) {
-      let v = l + sat * (S[o + c] - l) + delta;
+      let v = l + sat * (S[o + c] - l0) + delta;
       v = (v - lo) * inv;
       D[j + c] = v <= 0 ? 0 : v >= 1 ? 255 : Math.pow(v, gam) * 255;
     }
@@ -753,8 +1233,13 @@ function render() {
   cv.getContext("2d").putImageData(img, 0, 0);
   cv.hidden = false; $("empty").hidden = true;
   $("tag").hidden = false;
-  $("tag").textContent = `${state.sample ? "SAMPLE · " : ""}STACK OF ${$("sUsed").textContent}`;
+  $("tag").textContent = tagText();
+  $("sSize").textContent = O;
   $("compare").disabled = false; $("save").disabled = false;
+}
+function tagText() {
+  const up = state.upLabel ? ` · ${state.upLabel}` : "";
+  return `${state.sample ? "SAMPLE · " : ""}STACK OF ${$("sUsed").textContent}${up}`;
 }
 
 function drawStrip(sel) {
@@ -783,17 +1268,20 @@ function drawStrip(sel) {
 
 let rq = 0, rr = 0;
 function queueRestack() { clearTimeout(rq); rq = setTimeout(() => { if (state.frames.length) restack(); }, 150); }
+let eq = 0;
+function queueEnhance() { clearTimeout(eq); state.enhancing = true; eq = setTimeout(() => { if (state.base) enhance(); }, 250); }
 function queueRender() { cancelAnimationFrame(rr); rr = requestAnimationFrame(render); }
 
 /* ---------- controls ---------- */
 
-const fmt = { keep: (v) => v + "%", sharpFine: (v) => (+v).toFixed(1), sharpCoarse: (v) => (+v).toFixed(1), gamma: (v) => (+v).toFixed(2), black: (v) => (+v).toFixed(2), sat: (v) => (+v).toFixed(1) + "×", bright: (v) => (+v).toFixed(2) };
+const fmt = { denoise: (v) => (+v).toFixed(1), deblur: (v) => Math.round(v * 100) + "%", keep: (v) => v + "%", sharpFine: (v) => (+v).toFixed(1), sharpCoarse: (v) => (+v).toFixed(1), gamma: (v) => (+v).toFixed(2), black: (v) => (+v).toFixed(2), sat: (v) => (+v).toFixed(1) + "×", bright: (v) => (+v).toFixed(2) };
 for (const id of Object.keys(fmt)) {
   const el = $(id), out = $(id + "V");
   const upd = () => { out.textContent = fmt[id](el.value); };
   upd();
-  el.addEventListener("input", () => { upd(); if (id === "keep") queueRestack(); else queueRender(); });
+  el.addEventListener("input", () => { upd(); if (id === "keep") queueRestack(); else if (id === "denoise" || id === "deblur") queueEnhance(); else queueRender(); });
 }
+$("upscale").addEventListener("change", () => { if (state.stack) rebase(); });
 $("method").addEventListener("change", queueRestack);
 
 $("files").addEventListener("change", async (e) => {
@@ -814,14 +1302,17 @@ const cmp = $("compare");
 const showRef = (e) => {
   e.preventDefault();
   const f = state.frames[state.refIdx]; if (!f) return;
-  const img = new ImageData(new Uint8ClampedArray(f.data), state.OUT, state.OUT);
-  $("view").getContext("2d").putImageData(img, 0, 0);
+  const c = makeCanvas(state.OUT, state.OUT);
+  c.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(f.data), state.OUT, state.OUT), 0, 0);
+  const v = $("view"), g = v.getContext("2d");
+  g.imageSmoothingQuality = "high";
+  g.drawImage(c, 0, 0, v.width, v.height);
   $("tag").textContent = "BEST SINGLE FRAME";
 };
 const showStack = () => {
   if (!state.rendered) return;
   $("view").getContext("2d").putImageData(state.rendered, 0, 0);
-  $("tag").textContent = `${state.sample ? "SAMPLE · " : ""}STACK OF ${$("sUsed").textContent}`;
+  $("tag").textContent = tagText();
 };
 cmp.addEventListener("pointerdown", showRef);
 for (const ev of ["pointerup", "pointerleave", "pointercancel"]) cmp.addEventListener(ev, showStack);

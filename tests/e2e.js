@@ -12,7 +12,7 @@ const check = (ok, msg) => { console.log((ok ? 'PASS ' : 'FAIL ') + msg); if (!o
 
 async function waitDone(p) {
   await p.waitForFunction(() => state.busy || /^(No Moon|This browser|.*can't)/.test(document.getElementById('status').textContent), null, { timeout: 30000 });
-  await p.waitForFunction(() => !state.busy && !state.pending && /^(Done|No Moon|This browser|.*can't)/.test(document.getElementById('status').textContent), null, { timeout: 180000 });
+  await p.waitForFunction(() => !state.busy && !state.pending && !state.enhancing && /^(Done|No Moon|This browser|.*can't)/.test(document.getElementById('status').textContent), null, { timeout: 180000 });
   return p.textContent('#status');
 }
 const metrics = (p) => p.evaluate(() => {
@@ -37,7 +37,8 @@ const metrics = (p) => p.evaluate(() => {
   const p = await ctx.newPage();
   const errs = [];
   p.on('pageerror', (e) => errs.push(e.message));
-  p.on('console', (m) => { if (m.type() === 'error') errs.push(m.text()); });
+  // failed downloads (the AI model with no network) are expected; script errors are not
+  p.on('console', (m) => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) errs.push(m.text()); });
   await p.goto('http://localhost:8765/');
 
   // 1) pick photos WHILE the sample is still processing (tests the queue)
@@ -68,7 +69,19 @@ const metrics = (p) => p.evaluate(() => {
   await p.locator('#keep').fill('80'); await p.waitForTimeout(600);
   check(+(await p.textContent('#sUsed')) === Math.round(22 * 0.8), 'keep 80% restacks');
   await p.selectOption('#method', 'mean'); await p.waitForTimeout(600);
-  await p.locator('#sharpFine').fill('2.5'); await p.locator('#sat').fill('3'); await p.waitForTimeout(300);
+  await p.locator('#sharpFine').fill('1.5'); await p.locator('#sat').fill('3'); await p.waitForTimeout(300);
+  const idle = () => p.waitForFunction(() => !state.enhancing && state.enh, null, { timeout: 120000 });
+  await idle();
+  for (const [mode, factor] of [['off', 1], ['drizzle', 2], ['ai', 2]]) {
+    await p.selectOption('#upscale', mode); await p.waitForTimeout(100); await idle();
+    const [W, O] = await p.evaluate(() => [state.enh.W, state.OUT]);
+    check(W === O * factor, `upscale "${mode}" gives ${W}px output (${factor}x of ${O})`);
+  }
+  const before = await p.evaluate(() => state.enh.L);
+  await p.locator('#deblur').fill('0'); await p.locator('#denoise').fill('0'); await p.waitForTimeout(400); await idle();
+  const changed = await p.evaluate((b) => state.enh.L.some((v, i) => Math.abs(v - b[i]) > 0.5), before);
+  check(changed, 'denoise/deblur sliders re-run the enhancement');
+  await p.locator('#deblur').fill('0.65'); await p.locator('#denoise').fill('2.5'); await p.waitForTimeout(400); await idle();
   await p.locator('.thumb').first().click(); await p.waitForTimeout(600);
   check(await p.evaluate(() => state.frames.some((f) => f.off)), 'tapping a thumbnail drops the frame');
   const box = await p.locator('#compare').boundingBox();
